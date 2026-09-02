@@ -378,6 +378,42 @@ def _has_pending_paste(tmux: str, session: str) -> bool:
         return False
 
 
+def _is_residual_paste_tail(message: str, inline: str) -> bool:
+    """True if ``inline`` looks like the leftover *tail* of ``message`` rather
+    than a message that never got submitted.
+
+    Why this exists. The confirmed-submit retry below re-fires ``C-m`` when
+    inline content sits byte-stable in the input box, on the theory that the
+    submit was eaten. There is a second way to get a stable inline box, and it
+    is the opposite situation: the submit was **accepted**, but the paste was
+    still streaming, so the last few characters landed in the now-empty box
+    afterwards. Re-firing ``C-m`` then does not recover a lost message — it
+    *submits a fragment* as its own turn, which arrives at the agent looking
+    like a user instruction that starts mid-word.
+
+    Observed three times, 2026-09-01 and twice on 2026-09-02, always as the
+    tail of the preceding heartbeat payload, e.g.
+    ``" ext and hits turn limits faster.**How to apply:**- Code analysis"``.
+    The cut moved by one character between occurrences, which is the signature
+    of a timing race rather than a fixed truncation budget.
+
+    The discriminator: a *strict* suffix means the head already went through.
+    If the whole message is sitting there, it is a genuine eaten submit and the
+    retry is correct — so equality must NOT match. Whitespace is stripped from
+    both sides because the pane render wraps and pads, so only the character
+    sequence is comparable.
+    """
+    if not message or not inline:
+        return False
+    msg = "".join(message.split())
+    tail = "".join(inline.split())
+    if not tail or len(tail) >= len(msg):
+        # Equal or longer: the whole payload is stuck, or the box holds
+        # something we did not paste. Both belong to the retry path.
+        return False
+    return msg.endswith(tail)
+
+
 def submit_to_tmux(
     session: str, message: str, *,
     defer_if_busy: bool = False,
@@ -623,6 +659,15 @@ def submit_to_tmux(
             if inline is None or "[Pasted text #" in inline:
                 # Placeholder path, or a transient empty read — leave to
                 # the patient poll / watchdog; reset the stability window.
+                prev_inline = None
+                stable = 0
+                continue
+            if _is_residual_paste_tail(message, inline):
+                # Accepted submit + late-landing paste tail. Re-firing C-m
+                # here is what turns a harmless leftover into a spurious
+                # user turn — see _is_residual_paste_tail. Leave it for the
+                # next paste to overwrite; do not retry, do not count it
+                # toward stability.
                 prev_inline = None
                 stable = 0
                 continue
