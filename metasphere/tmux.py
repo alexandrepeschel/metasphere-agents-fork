@@ -72,6 +72,41 @@ _deferring_sessions: set[str] = set()
 # the buffer after use, so these don't accumulate.
 _buffer_counter = itertools.count()
 
+#: Tail of the last payload pasted into each session, persisted to disk.
+#:
+#: Why a file and not a module global: heartbeat injects are cron-spawned
+#: *processes* while telegram injects run in the gateway daemon (see the
+#: ``_buffer_counter`` note above). The submit that leaves a residual tail
+#: and the submit that trips over it are routinely in different processes,
+#: so in-memory state would miss exactly the cross-process case this guards.
+#: Only a bounded tail is stored — a leftover fragment is short, and keeping
+#: whole payloads on disk would be both pointless and a privacy footgun.
+_LAST_PASTE_TAIL_CHARS = 4000
+
+
+def _last_paste_path(session: str) -> "pathlib.Path":
+    import pathlib
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session)
+    d = pathlib.Path.home() / ".metasphere" / "state"
+    return d / f"last_paste.{safe}"
+
+
+def _record_last_paste(session: str, message: str) -> None:
+    """Remember what we just pasted so the next submit can recognise its tail."""
+    try:
+        p = _last_paste_path(session)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(message.split())[-_LAST_PASTE_TAIL_CHARS:])
+    except OSError:
+        pass  # best-effort; a missing hint only costs us the old behaviour
+
+
+def _read_last_paste(session: str) -> str:
+    try:
+        return _last_paste_path(session).read_text()
+    except OSError:
+        return ""
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -416,8 +451,35 @@ def submit_to_tmux(
         # On clean empty input, C-m is a no-op (no spurious turn).
         # 2026-04-20: the operator's suggestion — pre-C-m preserves legit
         # queued content instead of overwriting it.
+        #
+        # 2026-09-15: *unless what is sitting there is our own leftover.*
+        # The pre-flush assumes box content is legit pending content. A
+        # residual paste tail is the opposite — the previous submit was
+        # accepted and the last characters of that payload landed in the
+        # now-empty box afterwards. C-m then submits the fragment as its
+        # own turn, and it reaches the agent as a user message starting
+        # mid-word. This is the SECOND route to the symptom that
+        # ``_is_residual_paste_tail`` was written for: that guard sits in
+        # the post-submit retry loop below, so it never sees this path,
+        # which is why occurrences continued after it shipped. Observed
+        # three times on 09-15 alone, all tails of the heartbeat payload,
+        # all arriving at the *next* heartbeat's submit.
+        #
+        # C-u (kill line) rather than C-m: the fragment is ours and was
+        # already delivered as part of the head, so there is nothing to
+        # preserve. Falls through to the normal C-m when the box holds
+        # anything we do not recognise — an unknown box still belongs to
+        # the operator and must not be discarded.
+        _preflush_key = "C-m"
+        if _is_residual_paste_tail(_read_last_paste(session),
+                                   input_box_content(session) or ""):
+            _preflush_key = "C-u"
+            print(
+                f"[tmux.submit] dropping residual paste tail in {session}",
+                file=sys.stderr,
+            )
         subprocess.run(
-            [tmux, "send-keys", "-t", session, "C-m"],
+            [tmux, "send-keys", "-t", session, _preflush_key],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -581,6 +643,7 @@ def submit_to_tmux(
             if (not _has_pending_paste(tmux, session)
                     and not _input_line_has_typing(tmux, session)):
                 _deferring_sessions.discard(session)
+                _record_last_paste(session, message)
                 return True
             if not retry_on:
                 continue

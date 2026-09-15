@@ -960,3 +960,47 @@ def test_find_tmux_refuses_real_server_under_pytest(monkeypatch):
 
     monkeypatch.setenv("METASPHERE_ALLOW_TMUX_IN_TESTS", "1")
     assert T._find_tmux() == shutil.which("tmux")
+
+
+def test_residual_tail_round_trip_across_processes(tmp_path, monkeypatch):
+    """The pre-flush guard must work when paste and pre-flush are different runs.
+
+    Regression: 2026-09-15. `_is_residual_paste_tail` shipped inside the
+    post-submit retry loop only, so the *other* route to the same symptom
+    stayed open — the pre-flush `C-m` at the start of the NEXT submit,
+    which assumes anything in the input box is legit pending content and
+    submits it as its own user-turn. Three occurrences on 09-15 after the
+    retry-side guard was already loaded, all tails of the heartbeat
+    payload. Heartbeat injects are cron-spawned processes, so the hint has
+    to survive on disk rather than in a module global.
+    """
+    import metasphere.tmux as t
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    payload = "a heartbeat payload ending in auto-memory feedback delegate to agents"
+    t._record_last_paste("metasphere-orchestrator", payload)
+
+    # A later, separate read — stands in for the next process.
+    remembered = t._read_last_paste("metasphere-orchestrator")
+    assert remembered, "hint did not survive the write"
+
+    assert t._is_residual_paste_tail(remembered, "delegate to agents")
+    assert t._is_residual_paste_tail(remembered, " to agents")
+    # The whole payload is a genuine eaten submit, not a leftover.
+    assert not t._is_residual_paste_tail(remembered, payload)
+    # Operator typing must never be discarded.
+    assert not t._is_residual_paste_tail(remembered, "what is the status")
+
+
+def test_read_last_paste_missing_is_empty_not_an_error(tmp_path, monkeypatch):
+    """No hint on disk must degrade to the old behaviour, never raise.
+
+    A missing file is the normal state on a fresh box or after the first
+    ever submit, and it must leave the pre-flush doing exactly what it did
+    before — an empty hint makes `_is_residual_paste_tail` return False,
+    so the C-m path is preserved.
+    """
+    import metasphere.tmux as t
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert t._read_last_paste("never-pasted-here") == ""
+    assert not t._is_residual_paste_tail("", "anything at all")
