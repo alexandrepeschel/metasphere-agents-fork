@@ -27,7 +27,7 @@ metasphere-gateway restart
 
 That sends C-c C-c + `/exit` keystrokes to the `metasphere-orchestrator` tmux session and lets the respawn loop revive Claude. It also logs a `supervisor.restart_claude` event so the restart is observable, and writes a restart-pending marker so the watchdog injects a continuation prompt into the new instance. If the session isn't alive it starts one instead of failing.
 
-> There is **no** `metasphere-gateway restart-orchestrator` subcommand — that name was in this doc until 2026-08-27 and never existed. The real one is plain `restart`. It restarts *Claude inside the orchestrator session*, not the gateway daemon; the daemon is a systemd unit and is not what you want here. Dispatch: `metasphere/cli/gateway.py:80` → `restart_session` at `metasphere/gateway/session.py:397` → `restart_agent_session` at `:322`. The CLI logs the reason as `"CLI restart"`; if you need a specific reason in the event log, call `restart_session("<reason>")` in Python instead.
+> There is **no** `metasphere-gateway restart-orchestrator` subcommand — that name was in this doc until 2026-08-27 and never existed. The real one is plain `restart`. It restarts *the agent REPL inside the orchestrator session*, not the gateway daemon; the daemon is a systemd unit and is not what you want here. Dispatch: `metasphere/cli/gateway.py:80` → `restart_session` at `metasphere/gateway/session.py:397` → `restart_agent_session` at `:322`. The CLI logs the reason as `"CLI restart"`; if you need a specific reason in the event log, call `restart_session("<reason>")` in Python instead.
 
 **Steps to take when this slash command fires:**
 
