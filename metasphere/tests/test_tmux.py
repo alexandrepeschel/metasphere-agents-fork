@@ -37,6 +37,23 @@ def test_submit_diagnostic_includes_sortable_utc_timestamp(monkeypatch, capsys):
         line,
     )
 
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path, monkeypatch):
+    """Keep the suite out of the operator's real ``~/.metasphere/state/``.
+
+    Added 2026-09-15. ``submit_to_tmux`` began writing a last-paste hint on
+    every call, and nineteen tests here call it against the ambient HOME — so
+    running the suite wrote real files into the live state directory, and the
+    *next* test then read that residue back as production state. One test
+    failed for that reason and it was the honest kind of failure: the suite had
+    started sharing mutable state with the running system.
+
+    Autouse and module-wide rather than per-test, because the leak was created
+    by a change deep inside the code under test and any future write will land
+    in the same place without anyone remembering to opt in.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+
 
 def _fake_cp(returncode: int = 0, stdout: str = ""):
     cp = MagicMock()
@@ -940,12 +957,20 @@ def test_submit_confirmed_retry_recovers_eaten_enter_for_unmarked_human_msg(monk
     )
 
 
-def test_submit_confirmed_retry_skips_placeholder_large_payload(monkeypatch):
+def test_submit_confirmed_retry_skips_placeholder_large_payload(
+    tmp_path, monkeypatch
+):
     """A ``[Pasted text #`` placeholder (large payload mid-commit) must NOT
     draw a confirmed re-fire C-m — that would reintroduce the 2026-04-20
     stacking regression. Only inline content is a candidate; a stuck
     placeholder is left to submit_watchdog. Exactly 2 C-m (pre-flush +
-    submit), and the function returns False (dirty at timeout)."""
+    submit), and the function returns False (dirty at timeout).
+
+    This is the test that caught the state leak fixed by ``_isolate_home``: a
+    fresh hint left behind by an earlier test made the placeholder look like
+    our own leftover, so the pre-flush took the C-u path and only one C-m
+    fired.
+    """
     def fake_run(argv, **kw):
         if "has-session" in argv:
             return _fake_cp(returncode=0)
@@ -1150,3 +1175,67 @@ def test_short_operator_typing_still_needs_a_true_suffix(tmp_path, monkeypatch):
     assert t._is_residual_paste_tail(hint, "keeps going")
     # The whole payload is an eaten submit, never a leftover.
     assert not t._is_residual_paste_tail(hint, payload)
+
+
+def test_preflush_drops_an_unreadable_placeholder_when_we_just_pasted(
+    tmp_path, monkeypatch
+):
+    """The box can refuse to show its content, and that is the bleeding case.
+
+    Regression: 2026-09-15, fourth occurrence, after three content-based fixes.
+    A long leftover renders as `[Pasted text #N]` rather than as text, so every
+    "is this string ours" test returns False and the pre-flush C-m submits a
+    payload it cannot read. Identified by provenance instead: a placeholder we
+    did not just create, plus a paste hint written seconds ago, is ours.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(T.time, "sleep", lambda *_a, **_k: None)
+    T._record_last_paste("sess", "a long heartbeat payload " * 200)
+
+    calls = _capture_calls(monkeypatch)
+    monkeypatch.setattr(
+        T, "input_box_content", lambda *a, **k: "[Pasted text #12 +240 lines]"
+    )
+    T.submit_to_tmux("sess", "next payload", escape_prefix=False)
+
+    sendkeys = [c for c in calls if "send-keys" in c]
+    assert sendkeys[0][-1] == "C-u", (
+        f"pre-flush must kill an unreadable leftover, not submit it; got {sendkeys[0]}"
+    )
+
+
+def test_preflush_still_submits_a_placeholder_when_we_did_not_just_paste(
+    tmp_path, monkeypatch
+):
+    """Provenance, not placeholders-are-always-ours.
+
+    With no recent hint the placeholder belongs to the operator — a large block
+    they pasted and have not sent — and the old preserve-it C-m must stand.
+    Discarding that would be the expensive false positive.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(T.time, "sleep", lambda *_a, **_k: None)
+    # No hint on disk at all: we have not pasted into this session.
+    calls = _capture_calls(monkeypatch)
+    monkeypatch.setattr(
+        T, "input_box_content", lambda *a, **k: "[Pasted text #3 +80 lines]"
+    )
+    T.submit_to_tmux("sess-untouched", "payload", escape_prefix=False)
+
+    sendkeys = [c for c in calls if "send-keys" in c]
+    assert sendkeys[0][-1] == "C-m", (
+        f"operator's own paste must be preserved, not killed; got {sendkeys[0]}"
+    )
+
+
+def test_hint_freshness_expires(tmp_path, monkeypatch):
+    """A stale hint must not license discarding the box hours later."""
+    import os
+    monkeypatch.setenv("HOME", str(tmp_path))
+    T._record_last_paste("sess", "payload")
+    assert T._hint_is_fresh("sess")
+
+    p = T._last_paste_path("sess")
+    old = 1_000_000
+    os.utime(p, (old, old))
+    assert not T._hint_is_fresh("sess")
