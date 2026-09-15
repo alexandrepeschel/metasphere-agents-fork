@@ -94,6 +94,13 @@ _buffer_counter = itertools.count()
 #: whole payloads on disk would be both pointless and a privacy footgun.
 _LAST_PASTE_TAIL_CHARS = 4000
 
+#: Above this length, a box whose content appears anywhere inside the last
+#: payload is treated as our own leftover rather than as operator typing.
+#: Chosen to be far past what a human types by hand that also happens to be a
+#: verbatim slice of the previous heartbeat — 24 characters of exact match is
+#: already not a coincidence. Below it, the stricter suffix test still applies.
+_MIN_RESIDUAL_TAIL_CHARS = 24
+
 
 def _last_paste_path(session: str) -> "pathlib.Path":
     import pathlib
@@ -432,11 +439,27 @@ def _is_residual_paste_tail(message: str, inline: str) -> bool:
     The cut moved by one character between occurrences, which is the signature
     of a timing race rather than a fixed truncation budget.
 
-    The discriminator: a *strict* suffix means the head already went through.
-    If the whole message is sitting there, it is a genuine eaten submit and the
-    retry is correct — so equality must NOT match. Whitespace is stripped from
-    both sides because the pane render wraps and pads, so only the character
-    sequence is comparable.
+    The discriminator: a proper *substring* means the head already went
+    through. If the whole message is sitting there, it is a genuine eaten
+    submit and the retry is correct — so equality must NOT match. Whitespace
+    is stripped from both sides because the pane render wraps and pads, so
+    only the character sequence is comparable.
+
+    **2026-09-15 — it was a strict-suffix test and that was too narrow.** The
+    input box only renders as many lines as fit; on a long leftover the pane
+    shows a *middle slice* of it, so the visible text is a substring that does
+    not reach the end of the payload and the suffix test returns False. The
+    fragment then takes the retry path and gets submitted. Measured on the
+    occurrence that prompted this: the visible text sat at index 3574 of a
+    4000-character hint, i.e. 426 characters short of being a suffix. Short
+    tails had always happened to be fully visible, which is why the narrower
+    test looked correct for two weeks.
+
+    ``_MIN_RESIDUAL_TAIL_CHARS`` is what keeps this safe. Widening from suffix
+    to substring means operator typing could in principle match, so a fragment
+    must also be long enough that a human reproducing it verbatim out of the
+    previous payload is not a real scenario. Below that floor we fall back to
+    requiring a true suffix, which is the old behaviour.
     """
     if not message or not inline:
         return False
@@ -446,6 +469,8 @@ def _is_residual_paste_tail(message: str, inline: str) -> bool:
         # Equal or longer: the whole payload is stuck, or the box holds
         # something we did not paste. Both belong to the retry path.
         return False
+    if len(tail) >= _MIN_RESIDUAL_TAIL_CHARS:
+        return tail in msg
     return msg.endswith(tail)
 
 
