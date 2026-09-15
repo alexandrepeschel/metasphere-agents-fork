@@ -1004,3 +1004,36 @@ def test_read_last_paste_missing_is_empty_not_an_error(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     assert t._read_last_paste("never-pasted-here") == ""
     assert not t._is_residual_paste_tail("", "anything at all")
+
+
+def test_hint_is_recorded_even_when_the_submit_never_confirms(
+    tmp_path, monkeypatch
+):
+    """An unconfirmed submit still pasted, so it must still leave a hint.
+
+    Regression: 2026-09-15, the same day the guard shipped. The hint was
+    written only at the clean-poll `return True`, and a heartbeat injected
+    into a *busy* agent structurally never gets there — Claude Code queues
+    the paste behind the running turn, so the placeholder is still on
+    screen when the 12s poll gives up and the function returns False.
+    Delivery had succeeded; only the bookkeeping failed. Net effect: the
+    one payload whose tail actually bleeds into the next turn was the one
+    payload never recorded, so the pre-flush compared the leftover against
+    a stale hint from hours earlier and let the `C-m` through. The guard
+    looked installed and did nothing.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(T.time, "sleep", lambda *_a, **_k: None)
+    _capture_calls(monkeypatch)
+    # Never goes clean: the box keeps showing our placeholder.
+    monkeypatch.setattr(T, "_has_pending_paste", lambda *a, **k: True)
+    monkeypatch.setattr(
+        T, "input_box_content", lambda *a, **k: "[Pasted text #7 +200 lines]"
+    )
+
+    payload = "# HEARTBEAT ... trailing words of the memory context block"
+    assert T.submit_to_tmux("sess", payload, escape_prefix=False) is False
+
+    remembered = T._read_last_paste("sess")
+    assert remembered, "unconfirmed submit left no hint — guard is inert"
+    assert T._is_residual_paste_tail(remembered, "memory context block")
