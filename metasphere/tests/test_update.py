@@ -594,6 +594,78 @@ def test_git_pull_or_reset_refuses_when_status_fails():
         _update._git_pull_or_reset(Path("/tmp"), "main", runner)
 
 
+def test_git_pull_or_reset_refuses_on_unpushed_commits():
+    """Clean tree but HEAD ahead of origin → refuse before resetting.
+
+    Regression: 2026-09-15. The dirty-tree guard above only watches
+    uncommitted work, so *committing* — the obvious way to protect WIP —
+    moved it out of the guard's view and into the reset's path. The 04:00
+    auto-update ran against a checked-out feature branch holding two
+    unpushed commits (a 09-02 tmux paste-tail fix and a docs fix from that
+    night), could not fast-forward a diverged branch, fell through to
+    `git reset --hard origin/main`, and left both unreferenced.
+    """
+    import subprocess as _sp
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(args)
+        if args[0] == "status":
+            return _sp.CompletedProcess(args, 0, "", "")  # clean
+        if args[0] == "rev-list":
+            return _sp.CompletedProcess(
+                args, 0,
+                "0c5276b docs(session): point restart flow at the real command\n"
+                "b2d5ad5 fix(tmux): don't re-fire C-m for a residual paste tail\n",
+                "",
+            )
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    with pytest.raises(RuntimeError, match="not on origin/main"):
+        _update._git_pull_or_reset(Path("/tmp"), "main", runner)
+
+    # Fetching is fine (and required to ask the question accurately), but
+    # nothing that can move HEAD may run.
+    for c in calls:
+        assert c[0] not in ("pull", "reset"), (
+            f"unpushed-commit refusal must abort BEFORE moving HEAD, got {c}"
+        )
+
+
+def test_git_pull_or_reset_refuses_when_rev_list_fails():
+    """Unusable `git rev-list` → fail closed (assume commits at risk)."""
+    import subprocess as _sp
+
+    def runner(args):
+        if args[0] == "status":
+            return _sp.CompletedProcess(args, 0, "", "")  # clean
+        if args[0] == "rev-list":
+            return _sp.CompletedProcess(args, 128, "", "bad revision")
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    with pytest.raises(RuntimeError, match="not on origin/main|rev-list"):
+        _update._git_pull_or_reset(Path("/tmp"), "main", runner)
+
+
+def test_git_pull_or_reset_fetches_before_asking_what_is_unpushed():
+    """A stale origin ref would make pushed commits look unpushed.
+
+    The fetch must precede the rev-list, or a repo whose origin/<branch>
+    is behind reality refuses to update for no reason.
+    """
+    import subprocess as _sp
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(args)
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    _update._git_pull_or_reset(Path("/tmp"), "main", runner)
+
+    verbs = [c[0] for c in calls]
+    assert verbs.index("fetch") < verbs.index("rev-list")
+
+
 def test_find_repo_prefers_editable_install_over_project_root(tmp_path, monkeypatch):
     """When METASPHERE_PROJECT_ROOT points at the data dir (not a git
     repo), _find_repo should discover the actual repo via the editable
