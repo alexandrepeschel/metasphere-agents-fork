@@ -1099,3 +1099,54 @@ def test_hint_is_recorded_even_when_the_submit_never_confirms(
     remembered = T._read_last_paste("sess")
     assert remembered, "unconfirmed submit left no hint — guard is inert"
     assert T._is_residual_paste_tail(remembered, "memory context block")
+
+
+def test_residual_tail_matches_a_middle_slice_not_only_a_suffix(tmp_path, monkeypatch):
+    """A long leftover renders as a middle slice of the box, not its end.
+
+    Regression: 2026-09-15, third route to the same symptom. The guard tested
+    a strict suffix, which holds only while the whole leftover fits in the
+    visible input box. On a long one the pane shows a slice that stops short
+    of the payload's end, the suffix test fails, and the fragment takes the
+    eaten-submit retry path and gets submitted as its own user turn. Measured
+    on the real occurrence: the visible text sat at index 3574 of a 4000-char
+    hint, 426 characters short of being a suffix.
+    """
+    import metasphere.tmux as t
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    payload = (
+        "HEARTBEAT header " + ("filler body text " * 300)
+        + "started outside the gateway's tmux - direct"
+        + " trailing memory context that the pane never shows " * 8
+    )
+    t._record_last_paste("sess", payload)
+    hint = t._read_last_paste("sess")
+
+    middle = "d outside the gateway's tmux - direct trailing memory context"
+    assert "".join(middle.split()) in hint, "fixture is not actually a slice"
+    assert not hint.endswith("".join(middle.split())), "fixture is a suffix, not a middle slice"
+
+    assert t._is_residual_paste_tail(hint, middle), "middle slice must be recognised"
+
+
+def test_short_operator_typing_still_needs_a_true_suffix(tmp_path, monkeypatch):
+    """The substring widening must not start eating what the operator types.
+
+    Below _MIN_RESIDUAL_TAIL_CHARS the old suffix rule still applies, so a
+    short word that happens to occur inside the last payload is left alone and
+    submitted normally.
+    """
+    import metasphere.tmux as t
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    payload = "the quick brown fox jumps over the lazy dog and keeps going"
+    t._record_last_paste("sess", payload)
+    hint = t._read_last_paste("sess")
+
+    # "brown" is inside the payload but short — must NOT be discarded.
+    assert not t._is_residual_paste_tail(hint, "brown")
+    # A real short tail is still caught, because it is a genuine suffix.
+    assert t._is_residual_paste_tail(hint, "keeps going")
+    # The whole payload is an eaten submit, never a leftover.
+    assert not t._is_residual_paste_tail(hint, payload)
