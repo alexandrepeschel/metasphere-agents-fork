@@ -644,6 +644,24 @@ def submit_to_tmux(
             check=False,
         )
 
+        # Record the hint HERE, not at the success return below.
+        #
+        # 2026-09-15: the hint was originally written only when the
+        # post-submit poll came back clean — which a heartbeat injected
+        # into a *busy* agent can never do. Claude Code queues the paste
+        # behind the running turn, the ``[Pasted text #N]`` placeholder
+        # stays on screen past the 12s poll, and the function returns
+        # False even though delivery succeeded. So the one payload whose
+        # tail actually bleeds was the one payload never recorded, and
+        # the pre-flush guard above compared the leftover against a
+        # stale hint from hours earlier and let the C-m through.
+        #
+        # What the hint claims is "this is what we last pushed at the
+        # pane", which is true the moment the buffer is pasted. Whether
+        # the submit was later confirmed is a different question and not
+        # one the tail discriminator asks.
+        _record_last_paste(session, message)
+
         # Settle, then wait for the paste to actually land in the input
         # box before firing the submit C-m. The Claude Code TUI
         # (Ink/React) processes the bracketed-paste event asynchronously:
@@ -712,7 +730,6 @@ def submit_to_tmux(
             if (not _has_pending_paste(tmux, session)
                     and not _input_line_has_typing(tmux, session)):
                 _deferring_sessions.discard(session)
-                _record_last_paste(session, message)
                 return True
             if not retry_on:
                 continue
