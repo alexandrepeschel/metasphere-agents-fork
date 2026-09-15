@@ -434,18 +434,42 @@ def _dirty_paths(runner: GitRunner) -> list[str]:
     return [line for line in (r.stdout or "").splitlines() if line.strip()]
 
 
+def _unpushed_commits(runner: GitRunner, branch: str) -> list[str]:
+    """Return one-line descriptions of commits on HEAD but not ``origin/<branch>``.
+
+    Empty list = nothing would be lost by resetting onto the remote. A
+    failed rev-list fails closed (returns a sentinel) for the same reason
+    :func:`_dirty_paths` does: "can't tell" must not read as "safe".
+    """
+    r = runner(["rev-list", "--oneline", f"origin/{branch}..HEAD"])
+    if r.returncode != 0:
+        return [f"(git rev-list failed rc={r.returncode})"]
+    return [line for line in (r.stdout or "").splitlines() if line.strip()]
+
+
 def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
     """Fast-forward ``repo`` to ``origin/<branch>`` with a hard-reset fallback.
 
-    Refuses to proceed if the working tree has uncommitted changes —
-    the fallback is ``git reset --hard``, which silently destroys WIP.
-    Hit an operator on 2026-04-16 (10 files of uncommitted tmux work erased
-    by a wake-triggered auto-update). Caller must commit, stash, or
-    explicitly discard before re-running.
+    Refuses to proceed if the working tree has uncommitted changes, or if
+    the checked-out HEAD carries commits that are not on ``origin/<branch>``
+    — the fallback is ``git reset --hard``, which silently destroys both.
+
+    The uncommitted-changes guard came from 2026-04-16 (10 files of
+    uncommitted tmux work erased by a wake-triggered auto-update). It was
+    aimed only at the dirty tree, so committing your work — the obvious
+    way to protect it — moved it out of the guard's view and into the
+    reset's path. On 2026-09-15 that cost two commits on a checked-out
+    feature branch: an unpushed tmux paste-tail fix from 09-02 and a docs
+    fix from the same night. ``pull --ff-only`` cannot fast-forward a
+    diverged branch, so control reached ``reset --hard origin/main`` and
+    both were unreferenced. Recoverable from the reflog only until gc.
+
+    Caller must push, stash, or explicitly discard before re-running.
 
     Mirrors the bash ``git pull --ff-only`` → ``git fetch && git reset --hard``
     chain from the retired ``scripts/metasphere update`` path. Raises
-    ``RuntimeError`` if the tree is dirty or if both strategies fail.
+    ``RuntimeError`` if the tree is dirty, if HEAD holds unpushed commits,
+    or if both strategies fail.
     """
     dirty = _dirty_paths(runner)
     if dirty:
@@ -456,6 +480,26 @@ def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
             "The reset --hard fallback would silently destroy them.\n"
             "Commit, stash, or `git checkout -- .` before re-running.\n"
             f"Dirty paths:\n  {preview}{more}"
+        )
+    # Fetch before asking what is unpushed: a stale origin/<branch> ref
+    # makes local commits that ARE on the remote look unpushed, which
+    # would refuse the update for no reason.
+    pre_fetch = runner(["fetch", "origin", branch])
+    if pre_fetch.returncode != 0:
+        raise RuntimeError(
+            f"git fetch origin {branch} failed (rc={pre_fetch.returncode}): "
+            f"{(pre_fetch.stderr or pre_fetch.stdout or '').strip()}"
+        )
+    unpushed = _unpushed_commits(runner, branch)
+    if unpushed:
+        preview = "\n  ".join(unpushed[:20])
+        more = f"\n  ...and {len(unpushed) - 20} more" if len(unpushed) > 20 else ""
+        raise RuntimeError(
+            f"refusing to update: HEAD has {len(unpushed)} commit(s) not on "
+            f"origin/{branch}.\n"
+            "The reset --hard fallback would leave them unreferenced.\n"
+            "Push them, or reset explicitly, before re-running.\n"
+            f"Unpushed commits:\n  {preview}{more}"
         )
     ff = runner(["pull", "--ff-only", "origin", branch])
     if ff.returncode == 0:
