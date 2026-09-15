@@ -424,7 +424,7 @@ def cmd_session(args: str, ctx: Context) -> str:
     revives Claude automatically after /exit, so this is fire-and-forget.
 
     Subcommands:
-      restart  -> metasphere-gateway restart-orchestrator (default)
+      restart  -> metasphere.gateway.session.restart_session (default)
       status   -> systemctl --user status metasphere-gateway
     """
     sub = (args or "restart").strip().split(None, 1)[0] or "restart"
