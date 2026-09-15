@@ -125,6 +125,29 @@ def _read_last_paste(session: str) -> str:
     except OSError:
         return ""
 
+
+#: How recently we must have pasted for an unreadable box to count as ours.
+#: A residual tail lands within seconds of its own paste, so this only has to
+#: cover one submit cycle plus the TUI's render lag. Kept short because the
+#: cost of being wrong is discarding an operator's large paste.
+_HINT_FRESH_SECONDS = 90
+
+
+def _hint_is_fresh(session: str) -> bool:
+    """True if we pasted into *session* within the last few seconds.
+
+    The content-based tests cannot see through a ``[Pasted text #N]``
+    placeholder, so provenance has to stand in for content: if we pasted
+    moments ago and something unreadable is now sitting in the box, it is
+    overwhelmingly likely to be the tail of what we pasted.
+    """
+    try:
+        import time as _t
+        age = _t.time() - _last_paste_path(session).stat().st_mtime
+        return 0 <= age <= _HINT_FRESH_SECONDS
+    except OSError:
+        return False
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -564,9 +587,32 @@ def submit_to_tmux(
         # preserve. Falls through to the normal C-m when the box holds
         # anything we do not recognise — an unknown box still belongs to
         # the operator and must not be discarded.
+        # 2026-09-15, FOURTH occurrence and the last patch to this guard.
+        # Everything above compares the box's *text* against the hint. When the
+        # leftover is long the TUI does not show text at all — it shows a
+        # ``[Pasted text #N]`` placeholder, which is a substring of nothing, so
+        # every text-based test returns False and the pre-flush `C-m` submits a
+        # payload it cannot read. Three fixes in one day all missed this because
+        # all three asked "is this string ours", a question the pane refuses to
+        # answer in exactly the case that matters.
+        #
+        # So stop asking about the string. A placeholder we did not just create
+        # ourselves, sitting in the box while a hint written seconds ago says we
+        # pasted something, is our leftover — identified by provenance and
+        # timing rather than by content. The operator pasting a large block in
+        # the same few seconds is the false positive, and it is rare enough
+        # against a bleed that has now fired four times in one day; the window
+        # is kept tight to bound it.
         _preflush_key = "C-m"
-        if _is_residual_paste_tail(_read_last_paste(session),
-                                   input_box_content(session) or ""):
+        _box = input_box_content(session)
+        if _box and "[Pasted text #" in _box and _hint_is_fresh(session):
+            _preflush_key = "C-u"
+            print(
+                f"[tmux.submit] dropping unreadable residual paste in {session} "
+                f"(placeholder + fresh paste hint)",
+                file=sys.stderr,
+            )
+        elif _is_residual_paste_tail(_read_last_paste(session), _box or ""):
             _preflush_key = "C-u"
             print(
                 f"[tmux.submit] dropping residual paste tail in {session}",
