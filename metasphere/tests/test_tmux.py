@@ -1228,6 +1228,68 @@ def test_preflush_still_submits_a_placeholder_when_we_did_not_just_paste(
     )
 
 
+def test_preflush_drops_our_placeholder_even_when_the_hint_is_stale(
+    tmp_path, monkeypatch
+):
+    """FIFTH occurrence, 2026-09-16 — the window was sized against the wrong clock.
+
+    On an idle session the residual tail is not judged seconds after its own
+    paste; it waits for the NEXT heartbeat, one tick away. The 06:35:59Z tail
+    was seen at 06:41:00Z — 301s against a 90s window — so `_hint_is_fresh`
+    said "not ours" and the pre-flush C-m submitted a fragment of the
+    memory-context block as a user turn. The marker test must not care how
+    long ago it happened.
+    """
+    import os
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(T.time, "sleep", lambda *_a, **_k: None)
+
+    T._write_paste_marker("sess", "7")
+    T._record_last_paste("sess", "payload")
+    # Age both hints far past the freshness window, as an idle tick would.
+    old = 1_000_000
+    for path in (T._last_paste_path("sess"), T._paste_marker_path("sess")):
+        os.utime(path, (old, old))
+    assert not T._hint_is_fresh("sess"), "precondition: the time window has expired"
+
+    calls = _capture_calls(monkeypatch)
+    monkeypatch.setattr(
+        T, "input_box_content", lambda *a, **k: "[Pasted text #7 +120 lines]"
+    )
+    T.submit_to_tmux("sess", "next heartbeat", escape_prefix=False)
+
+    sendkeys = [c for c in calls if "send-keys" in c]
+    assert sendkeys[0][-1] == "C-u", (
+        "our own placeholder must be killed however stale the hint is; "
+        f"got {sendkeys[0]}"
+    )
+
+
+def test_preflush_preserves_a_placeholder_number_that_is_not_ours(
+    tmp_path, monkeypatch
+):
+    """The false positive the marker test exists to avoid.
+
+    A different number means the operator pasted after we did, so the box is
+    theirs and the preserve-it C-m stands. This is what makes the marker safe
+    to trust without a time bound.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(T.time, "sleep", lambda *_a, **_k: None)
+
+    T._write_paste_marker("sess", "7")
+    calls = _capture_calls(monkeypatch)
+    monkeypatch.setattr(
+        T, "input_box_content", lambda *a, **k: "[Pasted text #8 +200 lines]"
+    )
+    T.submit_to_tmux("sess", "next heartbeat", escape_prefix=False)
+
+    sendkeys = [c for c in calls if "send-keys" in c]
+    assert sendkeys[0][-1] == "C-m", (
+        f"a placeholder we did not create must be preserved; got {sendkeys[0]}"
+    )
+
+
 def test_hint_freshness_expires(tmp_path, monkeypatch):
     """A stale hint must not license discarding the box hours later."""
     import os
