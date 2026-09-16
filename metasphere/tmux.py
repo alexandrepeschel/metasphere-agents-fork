@@ -130,7 +130,65 @@ def _read_last_paste(session: str) -> str:
 #: A residual tail lands within seconds of its own paste, so this only has to
 #: cover one submit cycle plus the TUI's render lag. Kept short because the
 #: cost of being wrong is discarding an operator's large paste.
+#:
+#: 2026-09-16, FIFTH occurrence: this window was sized against the wrong clock
+#: and can never work. It answers "how soon after a paste does its tail appear"
+#: (seconds), but the quantity that matters is "how long until someone next
+#: runs the pre-flush that would clear it" — and on an idle session nothing
+#: runs until the NEXT heartbeat, one tick away. The 06:35:59Z heartbeat's tail
+#: was judged at 06:41:00Z: age 301s against a 90s window, so the guard said
+#: "not ours" and the C-m submitted a fragment of the memory-context block as a
+#: user turn. Widening it is not the fix either — our own pastes land every few
+#: minutes, so any window large enough to cover a tick makes the guard
+#: unconditional, which is exactly what the tight window existed to prevent.
+#: The window is now a FALLBACK behind the marker test below.
 _HINT_FRESH_SECONDS = 90
+
+_PLACEHOLDER_RE = re.compile(r"\[Pasted text #(\d+)")
+
+
+def _paste_marker_path(session: str) -> "pathlib.Path":
+    # pathlib is imported per-function throughout this module, not at top
+    # level; referencing it as a global here raised NameError and the broad
+    # except swallowed it into an early `return False`.
+    import pathlib
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session)
+    return pathlib.Path.home() / ".metasphere" / "state" / f"paste_marker.{safe}"
+
+
+def _write_paste_marker(session: str, n: str) -> None:
+    """Remember the ``[Pasted text #N]`` number the TUI gave OUR paste."""
+    try:
+        p = _paste_marker_path(session)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(n)
+    except OSError:
+        pass  # best-effort; absence just falls back to the freshness window
+
+
+def _read_paste_marker(session: str) -> str:
+    try:
+        return _paste_marker_path(session).read_text().strip()
+    except OSError:
+        return ""
+
+
+def _box_is_our_placeholder(session: str, box: str | None) -> bool:
+    """True when the box shows the very placeholder our own paste created.
+
+    Content-free provenance that does not depend on elapsed time. The TUI
+    numbers pastes monotonically within a session, so a placeholder carrying
+    the number we recorded at paste time is the one we made; an operator
+    pasting by hand afterwards gets a *different* number and is left alone.
+    This is what the five time-window and substring attempts were reaching
+    for — "is this ours" is a question about identity, not about content or
+    about how long ago it happened.
+    """
+    m = _PLACEHOLDER_RE.search(box or "")
+    if not m:
+        return False
+    ours = _read_paste_marker(session)
+    return bool(ours) and m.group(1) == ours
 
 
 def _hint_is_fresh(session: str) -> bool:
@@ -421,6 +479,31 @@ def input_box_content(session: str) -> str | None:
         return None
 
 
+def _pending_paste_number(tmux: str, session: str) -> str | None:
+    """The ``N`` of a visible ``[Pasted text #N]`` placeholder, else ``None``.
+
+    Same single ``capture-pane`` as :func:`_has_pending_paste` — this exists so
+    the paste-landed poll can learn *which* placeholder the TUI gave our paste
+    without spending a second capture on it.
+    """
+    try:
+        r = subprocess.run(
+            [tmux, "capture-pane", "-p", "-t", session],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if r.returncode != 0:
+            return None
+        for line in r.stdout.splitlines()[-5:]:
+            m = _PLACEHOLDER_RE.search(line)
+            if m:
+                return m.group(1)
+        return None
+    except OSError:
+        return None
+
+
 def _has_pending_paste(tmux: str, session: str) -> bool:
     """Return True if a ``[Pasted text #`` placeholder is visible in the
     last few lines of the session pane."""
@@ -605,7 +688,22 @@ def submit_to_tmux(
         # is kept tight to bound it.
         _preflush_key = "C-m"
         _box = input_box_content(session)
-        if _box and "[Pasted text #" in _box and _hint_is_fresh(session):
+        if _box_is_our_placeholder(session, _box):
+            # FIFTH occurrence fix, 2026-09-16. Identity, not recency: this is
+            # the placeholder number the TUI handed our own paste, so it is our
+            # leftover however long it has been sitting there. The freshness
+            # window below cannot reach this case — on an idle session the tail
+            # waits a whole heartbeat tick before any pre-flush sees it.
+            _preflush_key = "C-u"
+            print(
+                f"[tmux.submit] dropping unreadable residual paste in {session} "
+                f"(placeholder #{_read_paste_marker(session)} is ours)",
+                file=sys.stderr,
+            )
+        elif _box and "[Pasted text #" in _box and _hint_is_fresh(session):
+            # Fallback for the case where we never managed to read our own
+            # placeholder number (capture failed, or the paste landed inline
+            # and only became a placeholder later).
             _preflush_key = "C-u"
             print(
                 f"[tmux.submit] dropping unreadable residual paste in {session} "
@@ -756,10 +854,22 @@ def submit_to_tmux(
         # take, surfacing the failure to the caller.
         time.sleep(0.3)
         for _ in range(10):
-            if (_has_pending_paste(tmux, session)
-                    or _input_line_has_typing(tmux, session)):
+            # Record the placeholder number the TUI just assigned to OUR paste,
+            # while the box still holds it and before the submit C-m clears it.
+            # This is the only moment the association is observable, and it is
+            # what lets the next pre-flush recognise a leftover by identity
+            # rather than by guessing from the clock. Costs no extra capture:
+            # it is the same call `_has_pending_paste` was making, reading the
+            # number out instead of throwing it away. A miss falls back to the
+            # freshness window rather than producing a wrong answer.
+            _pasted_n = _pending_paste_number(tmux, session)
+            if _pasted_n is not None:
+                _write_paste_marker(session, _pasted_n)
+                break
+            if _input_line_has_typing(tmux, session):
                 break
             time.sleep(0.5)
+
         subprocess.run(
             # C-m (ASCII 0x0D) raw byte. tmux 3.3a's 'Enter' keysym
             # doesn't trigger submit in Claude Code's TUI (Ink/React)
