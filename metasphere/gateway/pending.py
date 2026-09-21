@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 from ..io import atomic_write_text, file_lock
@@ -47,6 +48,7 @@ def enqueue_inbound(
         atomic_write_text(
             marker,
             json.dumps({
+                "schema_version": 2,
                 "delivery_id": delivery_id,
                 "from_user": from_user,
                 "text": text,
@@ -61,52 +63,84 @@ def enqueue_inbound(
     return marker
 
 
-def retry_pending_inbound(paths: Paths | None = None) -> int:
-    """Retry queued inbound messages and remove only confirmed deliveries."""
-    paths = paths or resolve()
-    queue = _queue_dir(paths)
-    if not queue.is_dir():
-        return 0
+def _marker_sort_key(marker: Path) -> tuple[int, int, str]:
+    """Order legacy records first, then current records by sequence."""
+    prefix, separator, _rest = marker.name.partition("-")
+    if separator and prefix.isdigit():
+        return (1, int(prefix), marker.name)
+    try:
+        modified = marker.stat().st_mtime_ns
+    except OSError:
+        modified = 0
+    return (0, modified, marker.name)
 
+
+def _quarantine(marker: Path, reason: str) -> None:
+    """Retain an unreadable record outside the active queue and surface it."""
+    target = marker.with_suffix(marker.suffix + ".invalid")
+    try:
+        marker.replace(target)
+    except OSError:
+        target = marker
+    print(
+        f"[pending-inbound] quarantined {target}: {reason}",
+        file=sys.stderr,
+    )
+
+
+def _retry_pending_inbound_locked(queue: Path) -> int:
     from ..telegram.inject import submit_to_tmux
 
     delivered = 0
     blocked_agents: set[str] = set()
     blocked_sessions: set[str] = set()
-    for marker in sorted(queue.glob("*.json")):
+    for marker in sorted(queue.glob("*.json"), key=_marker_sort_key):
         try:
             data = json.loads(marker.read_text(encoding="utf-8"))
             from_user = data["from_user"]
             text = data["text"]
-            target_agent_id = data["target_agent_id"]
-            chat_id = data["chat_id"]
+            stored_session = data["session"]
+            target_agent_id = data.get("target_agent_id")
+            chat_id = data.get("chat_id")
             surface_id = data.get("surface_id", "telegram")
             thread_id = data.get("thread_id")
             reply_command = data.get("reply_command")
             if not all(isinstance(value, str) for value in (
-                from_user, text, target_agent_id, chat_id, surface_id,
+                from_user, text, stored_session, surface_id,
             )):
                 raise ValueError("invalid pending inbound fields")
+            legacy = target_agent_id is None and chat_id is None
+            if not legacy and not all(isinstance(value, str) for value in (
+                target_agent_id, chat_id,
+            )):
+                raise ValueError("invalid pending inbound routing fields")
             if thread_id is not None and not isinstance(thread_id, int):
                 raise ValueError("invalid pending inbound thread id")
             if reply_command is not None and not isinstance(reply_command, str):
                 raise ValueError("invalid pending inbound reply command")
-        except (OSError, KeyError, ValueError, json.JSONDecodeError):
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            _quarantine(marker, str(exc))
+            continue
+
+        if legacy:
+            # PR #42's first queue schema predated explicit agent/chat routing.
+            # Its stored session is the only safe delivery destination; do not
+            # discard the message merely because a rolling upgrade changed the
+            # schema. Legacy records sort before newly sequenced records.
+            session = stored_session
+            target_key = f"legacy-session:{session}"
+        else:
+            assert isinstance(target_agent_id, str)
+            if target_agent_id in blocked_agents:
+                continue
             try:
-                marker.unlink()
-            except OSError:
-                pass
-            continue
+                from ..session import _resolve_session
 
-        if target_agent_id in blocked_agents:
-            continue
-        try:
-            from ..session import _resolve_session
-
-            session = _resolve_session(target_agent_id)
-        except Exception:
-            blocked_agents.add(target_agent_id)
-            continue
+                session = _resolve_session(target_agent_id)
+            except Exception:
+                blocked_agents.add(target_agent_id)
+                continue
+            target_key = target_agent_id
         if session in blocked_sessions:
             continue
 
@@ -121,7 +155,7 @@ def retry_pending_inbound(paths: Paths | None = None) -> int:
         ):
             # Preserve FIFO for this target: tmux acceptance means queued, so
             # a later instruction must never leapfrog a blocked earlier one.
-            blocked_agents.add(target_agent_id)
+            blocked_agents.add(target_key)
             blocked_sessions.add(session)
             continue
         try:
@@ -132,3 +166,18 @@ def retry_pending_inbound(paths: Paths | None = None) -> int:
             continue
         delivered += 1
     return delivered
+
+
+def retry_pending_inbound(paths: Paths | None = None) -> int:
+    """Retry queued inbound messages and remove only confirmed deliveries.
+
+    A dedicated consumer lock covers the complete read-submit-unlink
+    transaction. Enqueue uses a separate lock, so new inbound can still be
+    persisted while a slow tmux submission is in progress.
+    """
+    paths = paths or resolve()
+    queue = _queue_dir(paths)
+    if not queue.is_dir():
+        return 0
+    with file_lock(queue / ".retry.lock"):
+        return _retry_pending_inbound_locked(queue)

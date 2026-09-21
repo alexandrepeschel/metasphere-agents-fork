@@ -901,6 +901,89 @@ def test_pending_inbound_cross_chat_envelopes_keep_explicit_destinations(
     }
 
 
+def test_pending_inbound_delivers_legacy_schema_v1_record(
+    tmp_paths: Paths, monkeypatch
+):
+    """A rolling upgrade must not delete the preceding queue schema."""
+    import json as _json
+    from metasphere.gateway import pending as gw_pending
+
+    queue = tmp_paths.state / "pending_inbound"
+    queue.mkdir(parents=True, exist_ok=True)
+    marker = queue / ("a" * 64 + ".json")
+    marker.write_text(_json.dumps({
+        "delivery_id": "telegram:5000:@orchestrator",
+        "from_user": "@operator",
+        "text": "LEGACY",
+        "session": "stored-legacy-session",
+        "surface_id": "telegram",
+        "reply_command": None,
+    }), encoding="utf-8")
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux",
+        lambda _from, text, *, session, **_kwargs: (
+            calls.append((session, text)) or True
+        ),
+    )
+
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 1
+    assert calls == [("stored-legacy-session", "LEGACY")]
+    assert not marker.exists()
+
+
+def test_pending_inbound_serializes_concurrent_retry_workers(
+    tmp_paths: Paths, monkeypatch
+):
+    import threading
+    import time
+    from metasphere.gateway import pending as gw_pending
+
+    gw_pending.enqueue_inbound(
+        delivery_id="telegram:6000:@orchestrator",
+        from_user="@operator",
+        text="ONCE",
+        session=gw_session.SESSION_NAME,
+        target_agent_id="@orchestrator",
+        chat_id=42,
+        paths=tmp_paths,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def slow_submit(_from, text, **_kwargs):
+        calls.append(text)
+        entered.set()
+        assert release.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux", slow_submit
+    )
+    results: list[int] = []
+    workers = [
+        threading.Thread(
+            target=lambda: results.append(
+                gw_pending.retry_pending_inbound(tmp_paths)
+            )
+        )
+        for _ in range(2)
+    ]
+    workers[0].start()
+    assert entered.wait(timeout=5)
+    workers[1].start()
+    time.sleep(0.1)
+    assert calls == ["ONCE"]
+    release.set()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert calls == ["ONCE"]
+    assert sorted(results) == [0, 1]
+
+
 # ---------------------------------------------------------------------------
 # Daemon: must NOT exit on a single iteration error
 # ---------------------------------------------------------------------------
