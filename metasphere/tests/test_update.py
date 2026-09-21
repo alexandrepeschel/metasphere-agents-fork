@@ -84,6 +84,29 @@ def test_register_job_updates_existing(tmp_paths):
     assert matching[0].enabled is False
 
 
+def test_register_job_prefers_canonical_runtime_over_invoking_venv(
+    tmp_paths, monkeypatch
+):
+    """A project venv must not become a permanent scheduler dependency."""
+    canonical = tmp_paths.root / "venv" / "bin" / "metasphere"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("#!/bin/sh\n")
+    foreign_python = tmp_paths.project_root / ".venv" / "bin" / "python"
+    foreign_binary = foreign_python.with_name("metasphere")
+    foreign_binary.parent.mkdir(parents=True)
+    foreign_binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(_update.sys, "executable", str(foreign_python))
+
+    job = _update.register_job(AutoUpdateConfig(enabled=True), tmp_paths)
+
+    expected = f"{canonical} update --quiet"
+    assert job.payload_message == expected
+    persisted = next(
+        j for j in _sched.load_jobs(tmp_paths) if j.id == _update.JOB_ID
+    )
+    assert persisted.payload_message == expected
+
+
 def test_register_job_preserves_last_fired_at(tmp_paths):
     _update.register_job(AutoUpdateConfig(enabled=True), tmp_paths)
     # Mutate last_fired_at then re-register.

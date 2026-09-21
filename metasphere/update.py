@@ -45,6 +45,7 @@ LOG_FILENAME = "auto-update.log"
 STATE_FILENAME = "auto-update.state.json"
 JOB_ID = "metasphere-auto-update"
 JOB_NAME = "metasphere:auto-update"
+_VENV_METASPHERE_BIN = "venv/bin/metasphere"
 
 INTERVAL_TO_CRON = {
     "daily": "0 4 * * *",
@@ -166,23 +167,31 @@ def interval_to_cron(interval: str) -> str:
 
 # ---------- schedule integration ----------
 
-def _metasphere_binary() -> str:
-    """Absolute path to the ``metasphere`` console script in the venv we're
-    running under. Using an absolute path in the cron payload avoids
-    relying on the systemd unit's PATH (which may resolve ``metasphere``
-    to a bash shim backed by ``/usr/bin/python3``, which in turn can't
-    import the pip-installed ``metasphere`` package and fails silently
-    with ``ModuleNotFoundError``).
+def _metasphere_binary(paths: Paths | None = None) -> str:
+    """Return a stable absolute path to the ``metasphere`` console script.
+
+    Prefer the canonical runtime venv under ``METASPHERE_DIR``. The command
+    registering the job may itself be launched from an unrelated project's
+    virtualenv; persisting that interpreter would make the daily updater
+    depend on the lifetime and installed package version of that project.
+
+    Fall back to the invoking interpreter's sibling entry point for fresh or
+    non-standard installations where the canonical runtime does not exist.
+    Using an absolute path avoids relying on the schedule daemon's ``PATH``.
     """
+    paths = paths or resolve()
+    canonical = paths.root / _VENV_METASPHERE_BIN
+    if canonical.is_file():
+        return str(canonical)
     candidate = Path(sys.executable).with_name("metasphere")
     if candidate.is_file():
         return str(candidate)
     return "metasphere"  # last-resort fallback
 
 
-def build_job(cfg: AutoUpdateConfig) -> _sched.Job:
+def build_job(cfg: AutoUpdateConfig, paths: Paths | None = None) -> _sched.Job:
     """Construct the auto-update Job for jobs.json."""
-    cmd = f"{_metasphere_binary()} update --quiet"
+    cmd = f"{_metasphere_binary(paths)} update --quiet"
     return _sched.Job(
         id=JOB_ID,
         source="auto-update",
@@ -209,7 +218,7 @@ def register_job(cfg: AutoUpdateConfig, paths: Paths | None = None) -> _sched.Jo
     """
     paths = paths or resolve()
     paths.schedule.mkdir(parents=True, exist_ok=True)
-    new_job = build_job(cfg)
+    new_job = build_job(cfg, paths)
     with _sched.with_locked_jobs(paths) as jobs:
         input_count = len(jobs)
         replaced = False
@@ -466,7 +475,6 @@ def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
         )
 
 
-_VENV_METASPHERE_BIN = "venv/bin/metasphere"
 CODEX_CONTEXT_LIMIT = 12_000
 
 
