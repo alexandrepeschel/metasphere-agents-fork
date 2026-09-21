@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from typing import Callable, Optional
 
 from ..io import atomic_write_text
@@ -112,6 +113,22 @@ def _default_pending_inbound_writer(**kwargs) -> None:
         enqueue_inbound(**kwargs)
     except Exception:
         pass
+
+
+def _explicit_reply_command(
+    surface_id: str,
+    chat_id: int,
+    thread_id: int | None,
+) -> str:
+    """Return a copy-verbatim reply command independent of the active pin."""
+    parts = [
+        "metasphere", "message", "send",
+        "--surface", surface_id,
+        "--chat-id", str(chat_id),
+    ]
+    if thread_id is not None:
+        parts.extend(["--thread-id", str(thread_id)])
+    return " ".join(shlex.quote(part) for part in parts) + ' "<reply>"'
 
 
 def handle_update(
@@ -402,6 +419,9 @@ def handle_update(
         target_session = _resolve_session(target_agent_id)
     except Exception:
         target_session = inject.DEFAULT_SESSION
+    reply_command = _explicit_reply_command(
+        surface_id, u.chat_id, u.thread_id,
+    )
     # QUEUE the inbound message behind any in-flight turn instead of
     # interrupting it. escape_prefix=True (the old default) fired an Escape to
     # kill the running turn before pasting; when that Escape landed mid-tool-
@@ -426,6 +446,7 @@ def handle_update(
     delivered = tmux_submit(
         f"@{u.from_username or 'user'}", payload,
         session=target_session, defer_if_busy=False, escape_prefix=False,
+        surface_id=surface_id, reply_command=reply_command,
     )
     if delivered is False:
         write_pending_inbound(
@@ -433,6 +454,9 @@ def handle_update(
             from_user=f"@{u.from_username or 'user'}",
             text=payload,
             session=target_session,
-            surface_id="telegram",
-            reply_command=None,
+            target_agent_id=target_agent_id,
+            chat_id=u.chat_id,
+            surface_id=surface_id,
+            thread_id=u.thread_id,
+            reply_command=reply_command,
         )

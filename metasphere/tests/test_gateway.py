@@ -797,6 +797,8 @@ def test_pending_inbound_retries_until_confirmed(tmp_paths: Paths, monkeypatch):
         from_user="@operator",
         text="do not lose this",
         session=gw_session.SESSION_NAME,
+        target_agent_id="@orchestrator",
+        chat_id=42,
         paths=tmp_paths,
     )
     submit = MagicMock(side_effect=[False, True])
@@ -808,6 +810,95 @@ def test_pending_inbound_retries_until_confirmed(tmp_paths: Paths, monkeypatch):
     assert not marker.exists()
     assert submit.call_count == 2
     assert submit.call_args.kwargs["escape_prefix"] is False
+
+
+def test_pending_inbound_preserves_fifo_behind_blocked_head(
+    tmp_paths: Paths, monkeypatch
+):
+    from metasphere.gateway import pending as gw_pending
+
+    for update_id, text in ((5100, "FIRST"), (5101, "SECOND")):
+        gw_pending.enqueue_inbound(
+            delivery_id=f"telegram:{update_id}:@orchestrator",
+            from_user="@operator",
+            text=text,
+            session=gw_session.SESSION_NAME,
+            target_agent_id="@orchestrator",
+            chat_id=42,
+            paths=tmp_paths,
+        )
+
+    attempts: list[str] = []
+
+    def blocked_submit(_from, text, **_kwargs):
+        attempts.append(text)
+        return False
+
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux", blocked_submit
+    )
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 0
+    assert attempts == ["FIRST"]
+
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux",
+        lambda _from, text, **_kwargs: attempts.append(text) or True,
+    )
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 2
+    assert attempts == ["FIRST", "FIRST", "SECOND"]
+
+
+def test_pending_inbound_cross_chat_envelopes_keep_explicit_destinations(
+    tmp_paths: Paths, monkeypatch
+):
+    from metasphere.gateway import pending as gw_pending
+    from metasphere.telegram import inject as tg_inject
+
+    destinations = (
+        (5100, "FIRST", "telegram-alpha", 111, 7),
+        (5101, "SECOND", "telegram-beta", 222, 9),
+    )
+    for update_id, text, surface, chat_id, thread_id in destinations:
+        reply = (
+            f"metasphere message send --surface {surface} "
+            f"--chat-id {chat_id} --thread-id {thread_id} \"<reply>\""
+        )
+        gw_pending.enqueue_inbound(
+            delivery_id=f"{surface}:{update_id}:@orchestrator",
+            from_user="@operator",
+            text=text,
+            session="stale-session-name",
+            target_agent_id="@orchestrator",
+            chat_id=chat_id,
+            surface_id=surface,
+            thread_id=thread_id,
+            reply_command=reply,
+            paths=tmp_paths,
+        )
+
+    payloads: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "metasphere.session._resolve_session",
+        lambda agent: "current-orchestrator-session",
+    )
+    monkeypatch.setattr(
+        tg_inject,
+        "_tmux_submit",
+        lambda session, payload, **_kwargs: (
+            payloads.append((session, payload)) or True
+        ),
+    )
+
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 2
+    assert [payload for _session, payload in payloads] == [
+        "[telegram from operator | reply: metasphere message send "
+        "--surface telegram-alpha --chat-id 111 --thread-id 7 \"<reply>\"] FIRST",
+        "[telegram from operator | reply: metasphere message send "
+        "--surface telegram-beta --chat-id 222 --thread-id 9 \"<reply>\"] SECOND",
+    ]
+    assert {session for session, _payload in payloads} == {
+        "current-orchestrator-session"
+    }
 
 
 # ---------------------------------------------------------------------------

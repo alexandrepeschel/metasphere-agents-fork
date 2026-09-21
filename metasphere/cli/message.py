@@ -23,7 +23,7 @@ from metasphere import contacts as _contacts
 DESCRIPTION = "Send a message across any surface (Telegram, Slack, ...)."
 
 USAGE = """\
-Usage: metasphere message send "<text>" [--surface auto|<id>] [--to <name>] [--chat-id <id>]
+Usage: metasphere message send "<text>" [--surface auto|<id>] [--to <name>] [--chat-id <id>] [--thread-id <id>]
 
 Options:
   --surface auto|<id>   Pick the surface for this send. Default: auto
@@ -36,6 +36,7 @@ Options:
                         per-surface key (telegram-cluster-1: ...) or fall
                         back to the surface_type key (telegram: ...).
   --chat-id <id>        Raw chat id; bypasses addressbook.
+  --thread-id <id>      Telegram forum topic id; requires a Telegram surface.
   --body-file PATH      Read the body verbatim from a file (no shell quoting).
 
 For rich content — parens, bullets (•), backticks, $, quotes, newlines —
@@ -90,6 +91,7 @@ def _dispatch(
     text: str,
     *,
     sender_agent: str,
+    thread_id: int | None = None,
 ) -> int:
     """Route ``text`` to the right adapter for ``surface_id``."""
     stype = _surface_type(surface_id)
@@ -103,13 +105,19 @@ def _dispatch(
                 file=sys.stderr,
             )
             return 2
-        _tg_api.send_with_cc(tg_chat_id, text, surface_id=surface_id)
+        kwargs = {"surface_id": surface_id}
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        _tg_api.send_with_cc(tg_chat_id, text, **kwargs)
         _tg_arch.archive_outgoing(
             sender_agent, text, tg_chat_id, surface_id=surface_id
         )
         print(f"Sent to {tg_chat_id} via {sender_agent} (surface={surface_id})")
         return 0
     if stype == "slack":
+        if thread_id is not None:
+            print("Error: --thread-id is only valid for Telegram.", file=sys.stderr)
+            return 2
         try:
             from metasphere.slack import api as _sl_api  # PR2 lands this
         except ImportError:
@@ -191,7 +199,11 @@ def cmd_send(args: argparse.Namespace) -> int:
         )
         return 2
 
-    return _dispatch(surface_id, chat_id, text, sender_agent=sender)
+    return _dispatch(
+        surface_id, chat_id, text,
+        sender_agent=sender,
+        thread_id=args.thread_id,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -214,6 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument(
         "--chat-id", default=None,
         help="Raw chat id; bypasses addressbook",
+    )
+    p_send.add_argument(
+        "--thread-id", type=int, default=None,
+        help="Telegram forum topic id",
     )
     from metasphere.cli._body import add_body_file_arg
     add_body_file_arg(p_send)

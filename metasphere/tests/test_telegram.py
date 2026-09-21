@@ -1359,12 +1359,18 @@ def test_handle_update_queues_failed_addressed_delivery(
         u,
         tmux_submit=lambda *args, **kwargs: False,
         write_pending_inbound=lambda **kwargs: queued.append(kwargs),
+        surface_id="telegram-relay",
     )
 
     assert len(queued) == 1
-    assert queued[0]["delivery_id"] == "telegram:5100:@orchestrator"
+    assert queued[0]["delivery_id"] == "telegram-relay:5100:@orchestrator"
     assert queued[0]["text"] == "survive the startup selector"
     assert queued[0]["session"] == "metasphere-orchestrator"
+    assert queued[0]["target_agent_id"] == "@orchestrator"
+    assert queued[0]["chat_id"] == 123
+    assert queued[0]["surface_id"] == "telegram-relay"
+    assert "--surface telegram-relay" in queued[0]["reply_command"]
+    assert "--chat-id 123" in queued[0]["reply_command"]
 
 
 def test_handle_update_addressed_group_calls_start_session(

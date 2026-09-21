@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from ..io import atomic_write_text
+from ..io import atomic_write_text, file_lock
 from ..paths import Paths, resolve
 
 
@@ -20,7 +20,10 @@ def enqueue_inbound(
     from_user: str,
     text: str,
     session: str,
+    target_agent_id: str,
+    chat_id: str | int,
     surface_id: str = "telegram",
+    thread_id: int | None = None,
     reply_command: str | None = None,
     paths: Paths | None = None,
 ) -> Path:
@@ -29,18 +32,32 @@ def enqueue_inbound(
     queue = _queue_dir(paths)
     queue.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(delivery_id.encode("utf-8")).hexdigest()
-    marker = queue / f"{digest}.json"
-    atomic_write_text(
-        marker,
-        json.dumps({
-            "delivery_id": delivery_id,
-            "from_user": from_user,
-            "text": text,
-            "session": session,
-            "surface_id": surface_id,
-            "reply_command": reply_command,
-        }) + "\n",
-    )
+    with file_lock(queue / ".lock"):
+        existing = sorted(queue.glob(f"*-{digest}.json"))
+        if existing:
+            marker = existing[0]
+        else:
+            sequence_file = queue / ".sequence"
+            try:
+                sequence = int(sequence_file.read_text(encoding="utf-8")) + 1
+            except (OSError, ValueError):
+                sequence = 1
+            atomic_write_text(sequence_file, f"{sequence}\n")
+            marker = queue / f"{sequence:020d}-{digest}.json"
+        atomic_write_text(
+            marker,
+            json.dumps({
+                "delivery_id": delivery_id,
+                "from_user": from_user,
+                "text": text,
+                "session": session,
+                "target_agent_id": target_agent_id,
+                "chat_id": str(chat_id),
+                "surface_id": surface_id,
+                "thread_id": thread_id,
+                "reply_command": reply_command,
+            }) + "\n",
+        )
     return marker
 
 
@@ -54,18 +71,24 @@ def retry_pending_inbound(paths: Paths | None = None) -> int:
     from ..telegram.inject import submit_to_tmux
 
     delivered = 0
+    blocked_agents: set[str] = set()
+    blocked_sessions: set[str] = set()
     for marker in sorted(queue.glob("*.json")):
         try:
             data = json.loads(marker.read_text(encoding="utf-8"))
             from_user = data["from_user"]
             text = data["text"]
-            session = data["session"]
+            target_agent_id = data["target_agent_id"]
+            chat_id = data["chat_id"]
             surface_id = data.get("surface_id", "telegram")
+            thread_id = data.get("thread_id")
             reply_command = data.get("reply_command")
             if not all(isinstance(value, str) for value in (
-                from_user, text, session, surface_id,
+                from_user, text, target_agent_id, chat_id, surface_id,
             )):
                 raise ValueError("invalid pending inbound fields")
+            if thread_id is not None and not isinstance(thread_id, int):
+                raise ValueError("invalid pending inbound thread id")
             if reply_command is not None and not isinstance(reply_command, str):
                 raise ValueError("invalid pending inbound reply command")
         except (OSError, KeyError, ValueError, json.JSONDecodeError):
@@ -73,6 +96,18 @@ def retry_pending_inbound(paths: Paths | None = None) -> int:
                 marker.unlink()
             except OSError:
                 pass
+            continue
+
+        if target_agent_id in blocked_agents:
+            continue
+        try:
+            from ..session import _resolve_session
+
+            session = _resolve_session(target_agent_id)
+        except Exception:
+            blocked_agents.add(target_agent_id)
+            continue
+        if session in blocked_sessions:
             continue
 
         if not submit_to_tmux(
@@ -84,6 +119,10 @@ def retry_pending_inbound(paths: Paths | None = None) -> int:
             surface_id=surface_id,
             reply_command=reply_command,
         ):
+            # Preserve FIFO for this target: tmux acceptance means queued, so
+            # a later instruction must never leapfrog a blocked earlier one.
+            blocked_agents.add(target_agent_id)
+            blocked_sessions.add(session)
             continue
         try:
             marker.unlink()
