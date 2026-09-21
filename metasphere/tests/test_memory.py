@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,60 @@ def test_cam_strategy_missing_binary_returns_empty(tmp_paths: Paths, monkeypatch
     assert strat.search("anything", limit=3) == []
 
 
+def test_cam_automatic_gate_keeps_recurse_and_rejects_no_overlap(monkeypatch):
+    """Batch-top normalization cannot make an unanchored CAM hit relevant."""
+    monkeypatch.setattr("metasphere.memory.cam.shutil.which", lambda _b: "/bin/cam")
+    payload = [
+        {
+            "path": "claude/old-recurse-session.md",
+            "title": "Recurse infrastructure decisions",
+            "keywords": ["recurse", "migration"],
+            "snippet": "The Recurse service migration retained the API.",
+            "score": 48.4,
+        },
+        {
+            "path": "claude/unrelated.md",
+            "title": "Telegram maintenance",
+            "keywords": ["telegram"],
+            # Incidental snippet text is not a durable lexical anchor.
+            "snippet": "Routine polling notes with a Recurse mention.",
+            "score": 70.0,
+        },
+    ]
+    monkeypatch.setattr(
+        "metasphere.memory.cam.subprocess.run",
+        lambda *a, **k: type("R", (), {
+            "returncode": 0, "stdout": json.dumps(payload)
+        })(),
+    )
+    gated = CamStrategy(min_lexical_overlap=1, max_eligible_hits=2)
+    recurse = gated.search("What about Recurse?", limit=5)
+    assert [hit.source for hit in recurse] == ["claude/old-recurse-session.md"]
+    assert recurse[0].metadata["lexical_overlap"] == 1
+    assert gated.search("frobnicate qzxv harmonica", limit=5) == []
+
+
+def test_cam_automatic_gate_anchors_only_on_current_prompt(monkeypatch):
+    monkeypatch.setattr("metasphere.memory.cam.shutil.which", lambda _b: "/bin/cam")
+    payload = [{
+        "path": "claude/metasphere-agents-maintenance.md",
+        "title": "metasphere agents maintenance",
+        "keywords": ["metasphere-agents"],
+        "snippet": "unrelated historical context",
+        "score": 99.0,
+    }]
+    monkeypatch.setattr(
+        "metasphere.memory.cam.subprocess.run",
+        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": json.dumps(payload)})(),
+    )
+    strategy = CamStrategy(
+        anchor_query="frobnicate qzxv",
+        min_lexical_overlap=1,
+        max_eligible_hits=1,
+    )
+    assert strategy.search("frobnicate qzxv metasphere-agents", limit=5) == []
+
+
 # ---------- HybridStrategy ----------
 
 
@@ -104,8 +159,9 @@ def test_hybrid_default_weights_dont_ceiling_below_default_floor():
     from metasphere.memory.hybrid import DEFAULT_WEIGHTS, HybridStrategy
 
     assert DEFAULT_WEIGHTS["auto-memory"] == 1.0
-    # cam/fts stay down-weighted as fuzzy corroborators, strictly below floor.
-    assert DEFAULT_WEIGHTS["cam"] < _DEFAULT_MIN_SCORE
+    # CAM has a narrow lexically-gated path above the floor; FTS remains
+    # strictly corroborative.
+    assert DEFAULT_WEIGHTS["cam"] > _DEFAULT_MIN_SCORE
     assert DEFAULT_WEIGHTS["fts"] < _DEFAULT_MIN_SCORE
 
     auto = _StubStrategy(
@@ -120,24 +176,25 @@ def test_hybrid_default_weights_dont_ceiling_below_default_floor():
     # Curated hit keeps its full score; the cam corroborator is ceilinged.
     assert hits["auto-memory:x.md"] == 1.0
     assert hits["cam/y"] == DEFAULT_WEIGHTS["cam"]
-    # A full-strength curated hit clears the default floor; a cam-only one
-    # does not (fuzzy sources must not render alone).
+    # A full-strength curated hit and an exceptionally strong CAM hit clear
+    # the floor, restoring pre-cutover-history recall.
     assert hits["auto-memory:x.md"] >= _DEFAULT_MIN_SCORE
-    assert hits["cam/y"] < _DEFAULT_MIN_SCORE
+    assert hits["cam/y"] >= _DEFAULT_MIN_SCORE
 
 
-def test_context_for_default_floor_renders_curated_hit_only():
-    """With the default floor, a full-strength curated (auto-memory) hit
-    renders while a fuzzy cam-only hit at its ceiling is filtered."""
+def test_context_for_default_floor_renders_curated_and_strong_cam_only():
+    """Strong CAM-only history can render while weaker CAM noise is cut."""
     auto = _StubStrategy(
         "auto-memory",
         [MemoryHit(source="auto-memory:keep.md", score=1.0, excerpt="kept")],
     )
-    cam = _StubStrategy(
-        "cam", [MemoryHit(source="cam/drop", score=1.0, excerpt="dropped")]
-    )
+    cam = _StubStrategy("cam", [
+        MemoryHit(source="cam/keep", score=0.95, excerpt="historical match"),
+        MemoryHit(source="cam/drop", score=0.70, excerpt="generic noise"),
+    ])
     out = context_for("ignored", strategies=[HybridStrategy([auto, cam])])
     assert "auto-memory:keep.md" in out
+    assert "cam/keep" in out
     assert "cam/drop" not in out
 
 

@@ -36,6 +36,15 @@ codex login
 METASPHERE_AGENT_RUNTIME=codex ./install.sh
 ```
 
+Codex installs the context and Stop hooks once at user scope in
+`~/.codex/hooks.json`. On the first interactive Codex launch, run `/hooks`,
+review the absolute Metasphere command paths, and trust them. This keeps
+Codex's normal hook trust boundary intact while making the same per-turn
+context available to the orchestrator, project agents, persistent panes, and
+headless runs. The context hook uses the current `UserPromptSubmit.prompt` for
+recall; its JSON `additionalContext` output follows the [official Codex hook
+contract](https://developers.openai.com/codex/hooks).
+
 You also need `tmux`, `Python 3.11+`, and `jq`:
 
 ```bash
@@ -367,6 +376,12 @@ metasphere migrate-project-dirs --project <name> --apply   # One project
 ```
 
 The migration moves legacy in-repo per-project state — `<repo>/.tasks/`, `<repo>/.messages/`, `<repo>/.changelog/`, `<repo>/.learnings/` — into the canonical per-project home at `~/.metasphere/projects/<name>/`. Idempotent; refuses on conflict (both legacy and canonical non-empty) so you can resolve manually. See [Architecture](#architecture) for the full canonical layout.
+
+For Codex installations, `metasphere update` also migrates Metasphere-owned
+context/Stop groups from legacy project-local `.codex/hooks.json` files into
+the single user-level `~/.codex/hooks.json`, preserving unrelated custom
+hooks. Because Codex hashes hook definitions for trust, use `/hooks` to review
+the updated definition after an install or command-path change.
 
 ## License
 

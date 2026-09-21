@@ -596,6 +596,7 @@ def test_run_posthook_routes_codex_payload_without_claude_breadcrumb(
 ):
     _write_chat_id(tmp_paths)
     monkeypatch.setenv("METASPHERE_AGENT_ID", "@orchestrator")
+    monkeypatch.setenv("METASPHERE_GATEWAY_SESSION", "1")
     payload = json.dumps(
         {
             "session_id": "codex-session",
@@ -610,6 +611,22 @@ def test_run_posthook_routes_codex_payload_without_claude_breadcrumb(
     assert rc == 0
     send.assert_called_once()
     assert not (tmp_paths.logs / "posthook-suppressions.log").exists()
+
+
+def test_run_posthook_unmanaged_codex_has_no_side_effects(tmp_paths: Paths, monkeypatch):
+    _write_chat_id(tmp_paths)
+    monkeypatch.setenv("METASPHERE_AGENT_ID", "@orchestrator")
+    monkeypatch.delenv("METASPHERE_GATEWAY_SESSION", raising=False)
+    payload = json.dumps({
+        "session_id": "private-codex-session",
+        "hook_event_name": "Stop",
+        "last_assistant_message": "private interactive reply",
+    }).encode()
+
+    with mock.patch("metasphere.telegram.api.send_message") as send:
+        assert posthook.run_posthook(payload, tmp_paths) == 0
+    send.assert_not_called()
+    assert not (tmp_paths.agent_dir("@orchestrator") / "activity.json").exists()
 
 
 # ---------- auto_close_finished_task ----------

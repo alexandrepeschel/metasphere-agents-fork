@@ -266,6 +266,35 @@ capsule, or the host-health ALERT. Sending such a reply to Telegram
 makes the agent look amnesic; suppressing it costs one turn but keeps
 trust in the channel.
 
+Claude reads this hook from the runtime/project
+`.claude/settings.local.json` files and receives the existing plain-text
+output. Codex reads one user-level definition from `~/.codex/hooks.json` and
+receives structured `hookSpecificOutput.additionalContext`; its event's
+`prompt` field is passed directly into recall. USER and IDENTITY baseline
+sections render before verbose SOUL and have independent byte budgets. The
+Codex handler's 12,000-token transport limit is intentionally above the
+builder's bounded section output so stable profile facts remain inline.
+
+The user-level Codex context hook also runs in direct (non-gateway) Codex
+sessions. Direct turns use a restricted, read-only profile: the hook event's
+`cwd` may select only the longest matching registered project, and output is
+limited to operator-controlled persona plus prompt-only curated memory for that
+registered project. Arbitrary Git roots, repo directives, Telegram, inbox,
+tasks, events, and other managed operational surfaces are excluded. Recalled
+memory is explicitly delimited as untrusted historical data, never
+instructions. No activity/breadcrumb state is written. The paired Stop hook
+returns immediately outside `METASPHERE_GATEWAY_SESSION`, so an ordinary local
+Codex response can never be forwarded to Telegram. Managed persistent and
+headless turns retain the full context, activity, breadcrumb, and forwarding
+behavior.
+
+Codex user hooks are non-managed hooks. Do not add
+`--dangerously-bypass-hook-trust` to project-agent launch paths: review and
+trust the generated absolute command via `/hooks`. This avoids implicitly
+trusting arbitrary project-local hooks. Updates remove only Metasphere-owned
+legacy matcher groups from runtime/source `.codex/hooks.json` files and retain
+operator-defined groups.
+
 ### Files
 
 - `metasphere/breadcrumbs.py` — breadcrumb read/write/evaluate helpers

@@ -714,6 +714,15 @@ def run_posthook(stdin_bytes: bytes, paths: Paths | None = None) -> int:
         paths = paths or resolve()
         payload = read_stop_hook_payload(stdin_bytes)
 
+        # The user-scoped Codex Stop hook is visible to ordinary interactive
+        # sessions too.  Only supervised Metasphere sessions may mutate agent
+        # state or forward their response to Telegram.
+        if (
+            stop_hook_provider(payload) == "codex"
+            and not os.environ.get("METASPHERE_GATEWAY_SESSION")
+        ):
+            return 0
+
         agent = resolve_agent_id(paths)
 
         # Re-entrancy guard: bail if claude-code is already inside a Stop hook.

@@ -13,8 +13,11 @@ from .base import MemoryHit, MemoryStrategy
 # sum). The curated auto-memory index is the highest-signal, hand-vetted
 # source, so it is not down-weighted below the fuzzy corroborators — a memo
 # that matches the query can reach a merged score of 1.0. cam/fts stay at
-# 0.6/0.4 as fuzzy corroborators. Absent names fall back to ``1/len``.
-DEFAULT_WEIGHTS = {"auto-memory": 1.0, "cam": 0.6, "fts": 0.4}
+# CAM gets a narrow path above the 0.61 render floor only after CamStrategy's
+# independent lexical-anchor gate. CAM's own scores are batch-normalized and
+# cannot establish absolute relevance. FTS remains corroborative. Absent names
+# fall back to ``1/len``.
+DEFAULT_WEIGHTS = {"auto-memory": 1.0, "cam": 0.7, "fts": 0.4}
 
 
 class HybridStrategy(MemoryStrategy):

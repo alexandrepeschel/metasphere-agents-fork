@@ -133,6 +133,49 @@ def test_install_sh_renders_three_split_daemons():
     assert "@@METASPHERE_VENV_BIN@@" in src
 
 
+def test_install_sh_codex_hook_migration_is_user_scoped_and_handler_granular():
+    """Installer must not delete custom siblings from a mixed hook group."""
+    src = INSTALL_SH.read_text()
+    start = src.index("seed_codex_hooks()")
+    end = src.index("seed_runtime_integration()", start)
+    block = src[start:end]
+    assert 'local target="$HOME/.codex"' in block
+    assert "UserPromptSubmit" in block
+    assert "additionalContextLimit: 12000" in block
+    # Filter handlers inside each group, then discard only empty groups. The
+    # former whole-group `select(any(...))` form erased custom sibling hooks.
+    assert 'def strip($sub; $exact): groups | map(' in block
+    assert '.hooks |= map(select((is_ms($sub; $exact)) | not))' in block
+    assert "select((.hooks | length) > 0)" in block
+    assert "select(any(.hooks[]?" not in block
+
+
+def test_install_sh_codex_hook_commands_quote_space_paths():
+    """Fresh installs must produce one shell word for a spaced venv path."""
+    src = INSTALL_SH.read_text()
+    start = src.index("seed_codex_hooks()")
+    end = src.index("seed_runtime_integration()", start)
+    block = src[start:end]
+    assert "printf -v hook_bin_quoted '%q' \"$hook_bin\"" in block
+    assert 'context_path="$hook_bin_quoted hooks context"' in block
+    assert 'posthook_path="$hook_bin_quoted hooks posthook"' in block
+
+    spaced = "/tmp/metasphere install/venv/bin/metasphere"
+    rendered = subprocess.run(
+        ["bash", "-c", "printf -v q '%q' \"$1\"; printf '%s' \"$q hooks context\"", "_", spaced],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
+    argv = subprocess.run(
+        ["bash", "-c", "eval 'set -- ' \"$1\"; printf '%s\\n' \"$#\" \"$1\" \"$2\" \"$3\"", "_", rendered],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.splitlines()
+    assert argv == ["3", spaced, "hooks", "context"]
+
+
 def test_install_sh_phases_out_obsolete_omnibus():
     src = INSTALL_SH.read_text()
     # The omnibus metasphere.service shipped a non-existent CLI verb
