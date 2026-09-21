@@ -94,6 +94,10 @@ def test_start_session_builds_runtime_command_at_creation_time(
         return MagicMock(returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.setenv("METASPHERE_ORCHESTRATOR_CODEX_MODEL", "future-model")
+    monkeypatch.setenv(
+        "METASPHERE_ORCHESTRATOR_CODEX_REASONING_EFFORT", "high"
+    )
     with patch.object(gw_session, "session_alive", return_value=False), \
          patch.object(gw_session, "_tmux", side_effect=fake_tmux):
         assert gw_session.start_session(tmp_paths) is True
@@ -105,6 +109,61 @@ def test_start_session_builds_runtime_command_at_creation_time(
     ]
     assert len(launch) == 1
     assert "--dangerously-bypass-hook-trust" in launch[0][3]
+    assert "--model future-model" in launch[0][3]
+    assert "model_reasoning_effort" in launch[0][3]
+    assert "high" in launch[0][3]
+
+
+def test_start_session_does_not_hardcode_codex_model(
+    tmp_paths: Paths, monkeypatch
+):
+    calls: list[tuple[str, ...]] = []
+
+    def fake_tmux(*args):
+        calls.append(args)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.delenv("METASPHERE_ORCHESTRATOR_CODEX_MODEL", raising=False)
+    monkeypatch.delenv(
+        "METASPHERE_ORCHESTRATOR_CODEX_REASONING_EFFORT", raising=False
+    )
+    with patch.object(gw_session, "session_alive", return_value=False), \
+         patch.object(gw_session, "_tmux", side_effect=fake_tmux):
+        assert gw_session.start_session(tmp_paths) is True
+
+    launch = next(
+        call for call in calls
+        if call[:3] == ("send-keys", "-t", gw_session.SESSION_NAME)
+        and any("codex --no-alt-screen" in arg for arg in call)
+    )
+    assert "--model" not in launch[3]
+    assert "model_reasoning_effort" not in launch[3]
+
+
+def test_start_session_cleans_up_when_runtime_send_fails(
+    tmp_paths: Paths, monkeypatch
+):
+    calls: list[tuple[str, ...]] = []
+
+    def fake_tmux(*args):
+        calls.append(args)
+        failed = args[:3] == (
+            "send-keys", "-t", gw_session.SESSION_NAME
+        ) and any("codex --no-alt-screen" in arg for arg in args)
+        return MagicMock(
+            returncode=1 if failed else 0,
+            stdout="",
+            stderr="launch failed" if failed else "",
+        )
+
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.setattr(gw_session, "session_alive", lambda name=None: False)
+    monkeypatch.setattr(gw_session, "_tmux", fake_tmux)
+
+    assert gw_session.start_session(tmp_paths) is False
+    assert ("kill-session", "-t", gw_session.SESSION_NAME) in calls
+    assert not gw_session._restart_marker_path(tmp_paths).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +739,249 @@ def test_check_restart_marker_uses_project_scoped_session(tmp_paths: Paths):
         f"expected project-aware session name, "
         f"got {captured.get('session')!r}"
     )
+
+
+def test_restart_marker_survives_codex_selector_then_retries(
+    tmp_paths: Paths, monkeypatch
+):
+    """Selector blocking and restart retry must compose without losing wake."""
+    import json as _json
+    from metasphere import tmux as tmux_module
+
+    now = 1_000_000
+    marker = gw_session._restart_marker_path(tmp_paths)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(_json.dumps({
+        "timestamp": now - 10,
+        "reason": "test restart",
+        "agent": "@orchestrator",
+    }), encoding="utf-8")
+
+    selector_visible = iter((True, False))
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.setattr(gw_watchdog, "session_alive", lambda name=None: True)
+    monkeypatch.setattr(tmux_module, "_find_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(tmux_module, "_has_session", lambda *_args: True)
+    monkeypatch.setattr(
+        tmux_module,
+        "_codex_startup_selector_in_pane",
+        lambda *_args: next(selector_visible),
+    )
+    monkeypatch.setattr(tmux_module, "_has_pending_paste", lambda *_args: False)
+    monkeypatch.setattr(tmux_module, "_input_line_has_typing", lambda *_args: False)
+    monkeypatch.setattr(tmux_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        tmux_module.subprocess,
+        "run",
+        lambda *args, **kwargs: MagicMock(returncode=0, stdout="", stderr=""),
+    )
+
+    assert gw_watchdog._check_restart_marker(
+        marker, tmp_paths, now=now
+    ) is False
+    retained = _json.loads(marker.read_text(encoding="utf-8"))
+    assert retained["timestamp"] == now
+    assert retained["attempts"] == 1
+
+    assert gw_watchdog._check_restart_marker(
+        marker, tmp_paths, now=now + gw_watchdog._RESTART_GRACE_S
+    ) is True
+    assert not marker.exists()
+
+
+def test_pending_inbound_retries_until_confirmed(tmp_paths: Paths, monkeypatch):
+    from metasphere.gateway import pending as gw_pending
+
+    marker = gw_pending.enqueue_inbound(
+        delivery_id="telegram:42:@orchestrator",
+        from_user="@operator",
+        text="do not lose this",
+        session=gw_session.SESSION_NAME,
+        target_agent_id="@orchestrator",
+        chat_id=42,
+        paths=tmp_paths,
+    )
+    submit = MagicMock(side_effect=[False, True])
+    monkeypatch.setattr("metasphere.telegram.inject.submit_to_tmux", submit)
+
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 0
+    assert marker.exists()
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 1
+    assert not marker.exists()
+    assert submit.call_count == 2
+    assert submit.call_args.kwargs["escape_prefix"] is False
+
+
+def test_pending_inbound_preserves_fifo_behind_blocked_head(
+    tmp_paths: Paths, monkeypatch
+):
+    from metasphere.gateway import pending as gw_pending
+
+    for update_id, text in ((5100, "FIRST"), (5101, "SECOND")):
+        gw_pending.enqueue_inbound(
+            delivery_id=f"telegram:{update_id}:@orchestrator",
+            from_user="@operator",
+            text=text,
+            session=gw_session.SESSION_NAME,
+            target_agent_id="@orchestrator",
+            chat_id=42,
+            paths=tmp_paths,
+        )
+
+    attempts: list[str] = []
+
+    def blocked_submit(_from, text, **_kwargs):
+        attempts.append(text)
+        return False
+
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux", blocked_submit
+    )
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 0
+    assert attempts == ["FIRST"]
+
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux",
+        lambda _from, text, **_kwargs: attempts.append(text) or True,
+    )
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 2
+    assert attempts == ["FIRST", "FIRST", "SECOND"]
+
+
+def test_pending_inbound_cross_chat_envelopes_keep_explicit_destinations(
+    tmp_paths: Paths, monkeypatch
+):
+    from metasphere.gateway import pending as gw_pending
+    from metasphere.telegram import inject as tg_inject
+
+    destinations = (
+        (5100, "FIRST", "telegram-alpha", 111, 7),
+        (5101, "SECOND", "telegram-beta", 222, 9),
+    )
+    for update_id, text, surface, chat_id, thread_id in destinations:
+        reply = (
+            f"metasphere message send --surface {surface} "
+            f"--chat-id {chat_id} --thread-id {thread_id} \"<reply>\""
+        )
+        gw_pending.enqueue_inbound(
+            delivery_id=f"{surface}:{update_id}:@orchestrator",
+            from_user="@operator",
+            text=text,
+            session="stale-session-name",
+            target_agent_id="@orchestrator",
+            chat_id=chat_id,
+            surface_id=surface,
+            thread_id=thread_id,
+            reply_command=reply,
+            paths=tmp_paths,
+        )
+
+    payloads: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "metasphere.session._resolve_session",
+        lambda agent: "current-orchestrator-session",
+    )
+    monkeypatch.setattr(
+        tg_inject,
+        "_tmux_submit",
+        lambda session, payload, **_kwargs: (
+            payloads.append((session, payload)) or True
+        ),
+    )
+
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 2
+    assert [payload for _session, payload in payloads] == [
+        "[telegram from operator | reply: metasphere message send "
+        "--surface telegram-alpha --chat-id 111 --thread-id 7 \"<reply>\"] FIRST",
+        "[telegram from operator | reply: metasphere message send "
+        "--surface telegram-beta --chat-id 222 --thread-id 9 \"<reply>\"] SECOND",
+    ]
+    assert {session for session, _payload in payloads} == {
+        "current-orchestrator-session"
+    }
+
+
+def test_pending_inbound_delivers_legacy_schema_v1_record(
+    tmp_paths: Paths, monkeypatch
+):
+    """A rolling upgrade must not delete the preceding queue schema."""
+    import json as _json
+    from metasphere.gateway import pending as gw_pending
+
+    queue = tmp_paths.state / "pending_inbound"
+    queue.mkdir(parents=True, exist_ok=True)
+    marker = queue / ("a" * 64 + ".json")
+    marker.write_text(_json.dumps({
+        "delivery_id": "telegram:5000:@orchestrator",
+        "from_user": "@operator",
+        "text": "LEGACY",
+        "session": "stored-legacy-session",
+        "surface_id": "telegram",
+        "reply_command": None,
+    }), encoding="utf-8")
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux",
+        lambda _from, text, *, session, **_kwargs: (
+            calls.append((session, text)) or True
+        ),
+    )
+
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 1
+    assert calls == [("stored-legacy-session", "LEGACY")]
+    assert not marker.exists()
+
+
+def test_pending_inbound_serializes_concurrent_retry_workers(
+    tmp_paths: Paths, monkeypatch
+):
+    import threading
+    import time
+    from metasphere.gateway import pending as gw_pending
+
+    gw_pending.enqueue_inbound(
+        delivery_id="telegram:6000:@orchestrator",
+        from_user="@operator",
+        text="ONCE",
+        session=gw_session.SESSION_NAME,
+        target_agent_id="@orchestrator",
+        chat_id=42,
+        paths=tmp_paths,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def slow_submit(_from, text, **_kwargs):
+        calls.append(text)
+        entered.set()
+        assert release.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(
+        "metasphere.telegram.inject.submit_to_tmux", slow_submit
+    )
+    results: list[int] = []
+    workers = [
+        threading.Thread(
+            target=lambda: results.append(
+                gw_pending.retry_pending_inbound(tmp_paths)
+            )
+        )
+        for _ in range(2)
+    ]
+    workers[0].start()
+    assert entered.wait(timeout=5)
+    workers[1].start()
+    time.sleep(0.1)
+    assert calls == ["ONCE"]
+    release.set()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert calls == ["ONCE"]
+    assert sorted(results) == [0, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -1326,6 +1628,71 @@ def test_respawn_cmd_codex_runtime_uses_interactive_tmux_flags():
     assert "[gateway] codex exited" in cmd
 
 
+def test_runtime_command_quotes_codex_reasoning_config():
+    command, runtime = gw_session._runtime_command(
+        runtime="codex",
+        reasoning_effort='high"; unsafe=true',
+    )
+    assert runtime == "codex"
+    assert "model_reasoning_effort" in command
+    # The quote is escaped inside one shell-quoted TOML assignment rather
+    # than becoming a second Codex config statement.
+    assert r'\"; unsafe=true' in command
+
+
+def test_respawn_command_preserves_adversarial_codex_values(
+    tmp_path, monkeypatch
+):
+    """Exercise both shell boundaries and assert argv is preserved exactly."""
+    import json as _json
+    import os as _os
+    import subprocess as _subprocess
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "argv.json"
+    pwned = tmp_path / "pwned"
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['ARGV_CAPTURE'], 'w') as fh:\n"
+        "    json.dump(sys.argv[1:], fh)\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+
+    model = f"model'; $(touch {pwned})\nnext"
+    effort = f'high"; $(touch {pwned})\nunsafe=true'
+    command = gw_session._respawn_cmd(
+        "@one-shot",
+        runtime="codex",
+        model=model,
+        reasoning_effort=effort,
+        agent_class="ephemeral",
+    )
+    env = _os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["ARGV_CAPTURE"] = str(capture)
+    result = _subprocess.run(
+        ["/bin/bash", "-c", command],
+        stdin=_subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = _json.loads(capture.read_text(encoding="utf-8"))
+    assert argv[argv.index("--model") + 1] == model
+    assert argv[argv.index("--config") + 1] == (
+        f"model_reasoning_effort={_json.dumps(effort)}"
+    )
+    assert not pwned.exists()
+
+
 def test_respawn_cmd_codex_project_agent_does_not_bypass_hook_trust():
     cmd = gw_session._respawn_cmd("@project-worker", runtime="codex")
     assert "codex --no-alt-screen" in cmd
@@ -1418,6 +1785,41 @@ def test_respawn_cmd_ephemeral_with_model():
     )
     assert "while true" not in cmd
     assert "--model claude-haiku-4-5" in cmd
+
+
+def test_restart_session_recreates_orchestrator_tmux(tmp_paths, monkeypatch):
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(gw_session, "session_alive", lambda name=None: True)
+    monkeypatch.setattr(
+        gw_session,
+        "_tmux",
+        lambda *args: (
+            calls.append(args)
+            or MagicMock(returncode=0, stdout="", stderr="")
+        ),
+    )
+    start = MagicMock(return_value=True)
+    monkeypatch.setattr(gw_session, "start_session", start)
+
+    assert gw_session.restart_session("test reason", tmp_paths) is True
+    assert calls == [("kill-session", "-t", gw_session.SESSION_NAME)]
+    start.assert_called_once_with(tmp_paths)
+    marker = gw_session._restart_marker_path(tmp_paths)
+    assert "test reason" in marker.read_text(encoding="utf-8")
+
+
+def test_restart_session_stops_if_tmux_kill_fails(tmp_paths, monkeypatch):
+    monkeypatch.setattr(gw_session, "session_alive", lambda name=None: True)
+    monkeypatch.setattr(
+        gw_session,
+        "_tmux",
+        lambda *args: MagicMock(returncode=1, stdout="", stderr="failed"),
+    )
+    start = MagicMock(return_value=True)
+    monkeypatch.setattr(gw_session, "start_session", start)
+
+    assert gw_session.restart_session("test", tmp_paths) is False
+    start.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

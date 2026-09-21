@@ -207,7 +207,7 @@ Read-only — this command never edits the ledger.
 Send a message across any surface (Telegram, Slack, ...).
 
 ```
-Usage: metasphere message send "<text>" [--surface auto|<id>] [--to <name>] [--chat-id <id>]
+Usage: metasphere message send "<text>" [--surface auto|<id>] [--to <name>] [--chat-id <id>] [--thread-id <id>]
 
 Options:
   --surface auto|<id>   Pick the surface for this send. Default: auto
@@ -220,6 +220,7 @@ Options:
                         per-surface key (telegram-cluster-1: ...) or fall
                         back to the surface_type key (telegram: ...).
   --chat-id <id>        Raw chat id; bypasses addressbook.
+  --thread-id <id>      Telegram forum topic id; requires a Telegram surface.
   --body-file PATH      Read the body verbatim from a file (no shell quoting).
 
 For rich content — parens, bullets (•), backticks, $, quotes, newlines —
@@ -600,8 +601,7 @@ Commands:
   ensure                 Start the orchestrator session if it is not
                          already alive.
   status                 Print orchestrator session liveness + idle.
-  restart                Restart the agent REPL inside the orchestrator
-                         session (preserves the tmux pane).
+  restart                Recreate the orchestrator tmux session and REPL.
 ```
 
 ### `metasphere daemon`

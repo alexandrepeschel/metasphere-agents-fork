@@ -51,6 +51,7 @@ import time
 from typing import Optional
 
 from ..events import log_event
+from ..io import atomic_write_text
 from ..paths import Paths, resolve
 from ..session import list_sessions
 from .session import SESSION_NAME, session_alive
@@ -612,12 +613,6 @@ def _check_restart_marker(
     if not session_alive(target_session):
         return False
 
-    # Grace period elapsed, session is alive — inject the wake-up.
-    try:
-        marker.unlink()
-    except OSError:
-        pass
-
     from ..telegram.inject import submit_to_tmux as _submit
 
     wake_msg = (
@@ -625,9 +620,8 @@ def _check_restart_marker(
         "Check messages and tasks, resume where you left off."
     )
     # defer_if_busy=True: post-restart wake is auto-fired. If a human
-    # is at the freshly-respawned pane and typing, drop this wake-msg
-    # — the next heartbeat will inject context anyway, so the agent
-    # still resumes; only the wake-msg phrasing is lost.
+    # is at the freshly-respawned pane and typing, retain the marker and
+    # retry after another grace window rather than interleaving with them.
     # escape_prefix=False: post-restart wake is an auto-injector and
     # must not interrupt whatever the respawned pane may already be
     # doing — queue the wake text; claude-code will process it when
@@ -640,10 +634,28 @@ def _check_restart_marker(
         escape_prefix=False,
     )
 
+    if success:
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+    else:
+        # A startup selector, a busy human input, or a transient tmux failure
+        # must not consume the only continuation attempt. Refresh the marker's
+        # retry clock so it remains durable beyond the normal stale cutoff and
+        # the next attempt still observes the startup grace period.
+        data["timestamp"] = now
+        data["attempts"] = int(data.get("attempts", 0)) + 1
+        try:
+            atomic_write_text(marker, json.dumps(data) + "\n")
+        except OSError:
+            pass
+
     try:
+        outcome = "Injected" if success else "Deferred"
         log_event(
             "supervisor.restart_wake",
-            f"Injected continuation prompt for {agent} ({reason})",
+            f"{outcome} continuation prompt for {agent} ({reason})",
             agent="@daemon-supervisor",
             paths=paths,
         )
@@ -728,6 +740,24 @@ def run_watchdog(paths: Optional[Paths] = None) -> None:
             log_event(
                 "supervisor.watchdog_error",
                 f"check_all_restart_pending: {e}",
+                agent="@daemon-supervisor",
+                paths=paths,
+            )
+        except Exception:
+            pass
+
+    # Failed addressed inbound is persisted separately from the transport
+    # archive. Retry it until tmux confirms delivery; selector blocks and
+    # transient session failures therefore cannot silently lose the message.
+    try:
+        from .pending import retry_pending_inbound
+
+        retry_pending_inbound(paths)
+    except Exception as e:  # pragma: no cover - defensive
+        try:
+            log_event(
+                "supervisor.watchdog_error",
+                f"retry_pending_inbound: {e}",
                 agent="@daemon-supervisor",
                 paths=paths,
             )

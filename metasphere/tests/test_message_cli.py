@@ -73,6 +73,27 @@ def test_message_send_surface_explicit_overrides_active(_wire_paths):
     )
 
 
+def test_message_send_targets_explicit_telegram_thread(_wire_paths):
+    with patch(
+        "metasphere.telegram.api.send_with_cc"
+    ) as send_mock, patch(
+        "metasphere.telegram.archiver.archive_outgoing"
+    ):
+        rc = _run([
+            "send", "topic reply",
+            "--surface", "telegram-relay",
+            "--chat-id", "-100123",
+            "--thread-id", "77",
+        ])
+    assert rc == 0
+    send_mock.assert_called_once_with(
+        -100123,
+        "topic reply",
+        surface_id="telegram-relay",
+        message_thread_id=77,
+    )
+
+
 def test_message_send_positional_newline_escapes_render_as_paragraphs(
     _wire_paths,
 ):

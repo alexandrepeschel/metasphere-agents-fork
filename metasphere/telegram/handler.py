@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from typing import Callable, Optional
 
 from ..io import atomic_write_text
@@ -26,6 +27,7 @@ Reactor = Callable[..., object]
 TmuxSubmit = Callable[..., bool]
 ChatIdSaver = Callable[[int], None]
 PendingAckWriter = Callable[[int, int], None]
+PendingInboundWriter = Callable[..., object]
 # (chat_id, username) -> (agent_id, allowed, deny_message_or_None)
 TargetResolver = Callable[..., routing.Resolution]
 
@@ -103,6 +105,32 @@ def _default_pending_ack_writer(chat_id: int, message_id: int) -> None:
         pass
 
 
+def _default_pending_inbound_writer(**kwargs) -> None:
+    """Queue an addressed inbound message when immediate tmux delivery fails."""
+    try:
+        from ..gateway.pending import enqueue_inbound
+
+        enqueue_inbound(**kwargs)
+    except Exception:
+        pass
+
+
+def _explicit_reply_command(
+    surface_id: str,
+    chat_id: int,
+    thread_id: int | None,
+) -> str:
+    """Return a copy-verbatim reply command independent of the active pin."""
+    parts = [
+        "metasphere", "message", "send",
+        "--surface", surface_id,
+        "--chat-id", str(chat_id),
+    ]
+    if thread_id is not None:
+        parts.extend(["--thread-id", str(thread_id)])
+    return " ".join(shlex.quote(part) for part in parts) + ' "<reply>"'
+
+
 def handle_update(
     u: poller.Update,
     *,
@@ -111,6 +139,7 @@ def handle_update(
     tmux_submit: Optional[TmuxSubmit] = None,
     save_chat_id: Optional[ChatIdSaver] = None,
     write_pending_ack: Optional[PendingAckWriter] = None,
+    write_pending_inbound: Optional[PendingInboundWriter] = None,
     resolve_target: Optional[TargetResolver] = None,
     surface_id: str = "telegram",
     target_agent_id: str = "@orchestrator",
@@ -137,6 +166,9 @@ def handle_update(
     tmux_submit = tmux_submit or inject.submit_to_tmux
     save_chat_id = save_chat_id or _default_save_chat_id
     write_pending_ack = write_pending_ack or _default_pending_ack_writer
+    write_pending_inbound = (
+        write_pending_inbound or _default_pending_inbound_writer
+    )
     resolve_target = resolve_target or routing.resolve_target
 
     if u.kind == "reaction":
@@ -387,6 +419,9 @@ def handle_update(
         target_session = _resolve_session(target_agent_id)
     except Exception:
         target_session = inject.DEFAULT_SESSION
+    reply_command = _explicit_reply_command(
+        surface_id, u.chat_id, u.thread_id,
+    )
     # QUEUE the inbound message behind any in-flight turn instead of
     # interrupting it. escape_prefix=True (the old default) fired an Escape to
     # kill the running turn before pasting; when that Escape landed mid-tool-
@@ -396,16 +431,32 @@ def handle_update(
     # the current turn finishes — the same safe path every auto-injector
     # (heartbeat/wake/posthook) already uses.
     #
-    # defer_if_busy stays False: telegram-user inbound must ALWAYS land, even
-    # when the REPL input box shows typed content (that is precisely what the
-    # user is replacing). Setting it True silently dropped user messages
+    # defer_if_busy stays False: telegram-user inbound must land even when the
+    # REPL input box shows typed content (that is precisely what the user is
+    # replacing). The lower-level Codex startup-selector safety gate is the
+    # intentional exception; a failed addressed delivery is persisted below
+    # and retried by the watchdog until tmux confirms it landed.
+    # Setting defer_if_busy=True silently dropped user messages
     # whenever the pane had typed content — the 2026-04-16 PR #23 regression
     # guarded by test_handle_update_telegram_inject_does_not_defer. So only the
     # interrupt behaviour changes here, not the delivery guarantee.
     #
     # Trade-off: telegram no longer interrupts a running turn; a deliberate
     # mid-turn stop would need an explicit /stop command (follow-up).
-    tmux_submit(
+    delivered = tmux_submit(
         f"@{u.from_username or 'user'}", payload,
         session=target_session, defer_if_busy=False, escape_prefix=False,
+        surface_id=surface_id, reply_command=reply_command,
     )
+    if delivered is False:
+        write_pending_inbound(
+            delivery_id=f"{surface_id}:{u.update_id}:{target_agent_id}",
+            from_user=f"@{u.from_username or 'user'}",
+            text=payload,
+            session=target_session,
+            target_agent_id=target_agent_id,
+            chat_id=u.chat_id,
+            surface_id=surface_id,
+            thread_id=u.thread_id,
+            reply_command=reply_command,
+        )

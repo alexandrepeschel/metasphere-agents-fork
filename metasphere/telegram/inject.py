@@ -33,9 +33,10 @@ def render_envelope(
 ) -> str:
     """Render the surface-aware inbound envelope prefix.
 
-    Telegram renders **identically to the historical format**
-    (``[telegram from <user>] <text>``) — no behaviour change for the
-    orchestrator's telegram inbound.
+    Telegram without an explicit reply command renders identically to the
+    historical format (``[telegram from <user>] <text>``). Routed inbound may
+    include a copy-verbatim reply command so delayed cross-chat turns never
+    depend on the mutable active-conversation pin.
 
     Every other surface gets a self-describing envelope that names the ACTUAL
     origin surface and bakes the **explicit, copy-verbatim reply command** the
@@ -53,6 +54,8 @@ def render_envelope(
     """
     stype = _surface_type(surface_id)
     if not stype or stype == "telegram":
+        if reply_command:
+            return f"[telegram from {safe_user} | reply: {reply_command}] {text}"
         return f"[telegram from {safe_user}] {text}"
     if reply_command:
         return f"[{safe_user} via {stype} | reply: {reply_command}] {text}"
@@ -73,8 +76,9 @@ def submit_to_tmux(
 
     The prefix is rendered by :func:`render_envelope` from ``surface_id`` (and
     the caller-supplied ``reply_command``) — telegram keeps the historical
-    ``[telegram from <from_user>] <text>`` shape, non-telegram surfaces get the
-    self-describing ``[<user> via <surface> | reply: <cmd>]`` envelope.
+    ``[telegram from <from_user>] <text>`` shape when no reply command is
+    supplied. Routed Telegram and non-Telegram surfaces can carry the
+    self-describing ``[<user> ... | reply: <cmd>]`` envelope.
     ``surface_id`` defaults to ``"telegram"`` and ``reply_command`` to ``None``
     so every existing caller is byte-for-byte unchanged.
 
