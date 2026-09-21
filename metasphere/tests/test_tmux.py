@@ -13,11 +13,29 @@ Escape if the Enter-retry loop exhausts without clearing.
 
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
 
 from metasphere import tmux as T
+
+
+def test_submit_diagnostic_includes_sortable_utc_timestamp(monkeypatch, capsys):
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", T._utcnow())
+    monkeypatch.setattr(T, "_utcnow", lambda: "2026-09-21T10:30:45Z")
+
+    T._log_submit("defer: input has typing in agent-demo")
+
+    line = capsys.readouterr().err.strip()
+    assert line == (
+        "2026-09-21T10:30:45Z "
+        "[tmux.submit] defer: input has typing in agent-demo"
+    )
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \[tmux\.submit\] .+",
+        line,
+    )
 
 
 def _fake_cp(returncode: int = 0, stdout: str = ""):
