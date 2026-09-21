@@ -29,6 +29,22 @@ def test_version_unknown_commit_when_not_a_repo(capsys):
     assert rc == 0
 
 
+def test_head_hash_uses_installed_source_not_caller_cwd():
+    completed = mock.Mock(returncode=0, stdout="abcdef1234567890\n")
+    expected_root = Path(V.__file__).resolve().parents[2]
+
+    with mock.patch.object(V.subprocess, "run", return_value=completed) as run:
+        assert V._head_hash() == "abcdef123456"
+
+    run.assert_called_once_with(
+        ["git", "-C", str(expected_root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+
+
 def test_version_registered_in_dispatcher():
     from metasphere.cli.main import REGISTRY
     assert "version" in REGISTRY

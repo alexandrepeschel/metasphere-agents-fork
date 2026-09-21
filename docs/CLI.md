@@ -50,7 +50,7 @@ Subcommands:
   audit-docs            Scan commits since the last CHANGELOG entry for doc drift.
   migrate-project-dirs  Migrate project-scoped content to the canonical projects/ layout.
   docs                  Regenerate docs/CLI.md from each handler's DESCRIPTION + USAGE.
-  version               Print installed package version + current HEAD commit hash.
+  version               Print installed package version + installed source commit hash.
 
 Run `metasphere <subcommand> --help` for details.
 ```
@@ -855,12 +855,12 @@ Takes no other arguments.
 
 ### `metasphere version`
 
-Print installed package version + current HEAD commit hash.
+Print installed package version + installed source commit hash.
 
 ```
 Usage: metasphere version
 
-Print the installed metasphere package version and current HEAD commit hash.
+Print the installed metasphere package version and installed source commit hash.
 
 Takes no arguments.
 ```

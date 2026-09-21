@@ -1,8 +1,8 @@
 """``metasphere version`` — print installed version + HEAD commit.
 
 Reads the package version from the installed ``pyproject.toml`` and
-the current HEAD short-hash via ``git rev-parse``. Used by the update
-flow to confirm a self-upgrade actually landed and by the daily
+the installed source checkout's HEAD short-hash via ``git rev-parse``.
+Used by the update flow to confirm a self-upgrade actually landed and by the daily
 briefing to anchor "what's running right now". Best-effort on the
 git side — falls back to the packaged version alone outside a git
 worktree.
@@ -17,10 +17,16 @@ from pathlib import Path
 
 
 def _head_hash() -> str:
-    """Return the first 12 chars of HEAD, or ``(unknown)``."""
+    """Return the installed source checkout's HEAD, or ``(unknown)``.
+
+    The command may be invoked while the caller is inside an unrelated Git
+    repository.  Resolve from this module instead of inheriting the process
+    cwd so ``metasphere version`` describes the code that is actually loaded.
+    """
+    source_root = Path(__file__).resolve().parents[2]
     try:
         r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "-C", str(source_root), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=False,
@@ -70,12 +76,12 @@ def _resolve_version() -> str:
         return "0.0.0"
 
 
-DESCRIPTION = "Print installed package version + current HEAD commit hash."
+DESCRIPTION = "Print installed package version + installed source commit hash."
 
 USAGE = """\
 Usage: metasphere version
 
-Print the installed metasphere package version and current HEAD commit hash.
+Print the installed metasphere package version and installed source commit hash.
 
 Takes no arguments.
 """
