@@ -39,9 +39,17 @@ from metasphere.identity import resolve_agent_id
 from metasphere.paths import resolve
 
 
-def _paths_for_hook_cwd(paths, cwd_value: object):
-    """Resolve project/scope from the hook's cwd, not daemon-wide env."""
+def _paths_for_hook_cwd(paths, cwd_value: object, *, registered_only: bool = False):
+    """Resolve project/scope from the hook's cwd, not daemon-wide env.
+
+    Direct user-level Codex hooks set ``registered_only`` so an arbitrary
+    repository cannot become a trusted context root merely by supplying its
+    cwd.  Managed sessions retain the Git-root fallback used by legacy launch
+    paths.
+    """
     if not isinstance(cwd_value, str) or not cwd_value.strip():
+        if registered_only:
+            return replace(paths, project_root=paths.root, scope=paths.root)
         return paths
     cwd = Path(cwd_value).expanduser().resolve()
     project_root = None
@@ -59,7 +67,7 @@ def _paths_for_hook_cwd(paths, cwd_value: object):
             project_root = max(matches, key=lambda path: len(path.parts))
     except Exception:  # noqa: BLE001 - hook context remains best effort
         pass
-    if project_root is None:
+    if project_root is None and not registered_only:
         try:
             output = subprocess.check_output(
                 ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
@@ -70,6 +78,11 @@ def _paths_for_hook_cwd(paths, cwd_value: object):
                 project_root = Path(output).resolve()
         except (OSError, subprocess.SubprocessError):
             pass
+    if project_root is None and registered_only:
+        # Keep direct hooks on operator-controlled storage when cwd is not a
+        # registered project.  The restricted builder will emit global persona
+        # only and skip project memory in this case.
+        return replace(paths, project_root=paths.root, scope=paths.root)
     return replace(paths, project_root=project_root or paths.project_root, scope=cwd)
 
 
@@ -137,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     # the ambient stem, preserving prior behavior.
     prompt = str(payload.get("prompt") or "")
 
-    paths = _paths_for_hook_cwd(resolve(), payload.get("cwd"))
+    paths = _paths_for_hook_cwd(
+        resolve(), payload.get("cwd"), registered_only=not managed
+    )
     agent = resolve_agent_id(paths)
     user_msg_count = _bc.count_user_messages(transcript_path) if transcript_path else 0
 
@@ -150,7 +165,12 @@ def main(argv: list[str] | None = None) -> int:
         touch_last_active(agent, paths)
 
     try:
-        block = build_context(paths, prompt=prompt, read_only=not managed)
+        block = build_context(
+            paths,
+            prompt=prompt,
+            read_only=not managed,
+            profile="managed" if managed else "direct-codex",
+        )
         # Codex supports plain stdout for UserPromptSubmit, but the structured
         # form makes the event and trust boundary explicit and safely JSON-
         # escapes arbitrary memory/persona text. ``turn_id`` is a Codex-only

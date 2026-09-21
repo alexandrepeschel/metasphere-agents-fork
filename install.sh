@@ -1305,8 +1305,11 @@ seed_claude_permissions() {
 seed_codex_hooks() {
     info "Seeding Codex hooks..."
 
-    local context_path="$METASPHERE_DIR/venv/bin/metasphere hooks context"
-    local posthook_path="$METASPHERE_DIR/venv/bin/metasphere hooks posthook"
+    local hook_bin hook_bin_quoted context_path posthook_path
+    hook_bin="$METASPHERE_DIR/venv/bin/metasphere"
+    printf -v hook_bin_quoted '%q' "$hook_bin"
+    context_path="$hook_bin_quoted hooks context"
+    posthook_path="$hook_bin_quoted hooks posthook"
     # Codex loads every matching hook source, rather than applying normal
     # config-layer replacement. Install once at user scope so direct,
     # persistent, and headless sessions (including project agents) share the
