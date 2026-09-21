@@ -711,5 +711,96 @@ def test_fire_job_dispatches_without_changing_last_fired(tmp_paths):
         paths=tmp_paths,
         job_name="manual-check",
         model="",
+        session_target="persistent",
     )
     assert _sched.load_jobs(tmp_paths)[0].last_fired_at == 0
+
+
+def test_isolated_job_with_model_spawns_ephemeral_not_orchestrator_inject(tmp_paths):
+    """A cron job that asked for an isolated session AND named a model must
+    not be injected into the persistent orchestrator pane: that pane runs
+    whatever model it was started with, so the job's `model` was silently
+    discarded and eleven jobs configured for Haiku/Sonnet ran on Opus."""
+    with mock.patch("metasphere.schedule._agents.spawn_ephemeral") as spawn_mock, \
+            mock.patch("metasphere.schedule._agents._submit_via_tmux") as submit_mock, \
+            mock.patch("metasphere.gateway.session.start_session", return_value=True):
+        ok = _sched.dispatch_to_agent(
+            "@orchestrator", "run the thing", paths=tmp_paths,
+            job_name="writers-room:daily-checkin",
+            model="claude-haiku-4-5-20251001",
+            session_target="isolated",
+        )
+
+    assert ok is True
+    submit_mock.assert_not_called()
+    spawn_mock.assert_called_once()
+    args, kwargs = spawn_mock.call_args
+    assert args[2] == "run the thing"
+    assert kwargs["model"] == "claude-haiku-4-5-20251001"
+    assert args[0].startswith("@writers-room-daily-checkin-")
+
+
+def test_isolated_spawn_failure_falls_back_to_orchestrator_inject(tmp_paths):
+    """A broken spawn must degrade to the old behaviour, not drop the task."""
+    with mock.patch(
+        "metasphere.schedule._agents.spawn_ephemeral",
+        side_effect=RuntimeError("no tmux"),
+    ), mock.patch(
+        "metasphere.schedule._agents._submit_via_tmux", return_value=True,
+    ) as submit_mock, mock.patch(
+        "metasphere.gateway.session.start_session", return_value=True,
+    ):
+        ok = _sched.dispatch_to_agent(
+            "@orchestrator", "run the thing", paths=tmp_paths,
+            job_name="j", model="claude-haiku-4-5-20251001",
+            session_target="isolated",
+        )
+
+    assert ok is True
+    submit_mock.assert_called_once()
+
+
+def test_persistent_job_still_injects_into_orchestrator(tmp_paths):
+    """The default path is unchanged — no model, no isolation, no spawn."""
+    with mock.patch("metasphere.schedule._agents.spawn_ephemeral") as spawn_mock, \
+            mock.patch(
+                "metasphere.schedule._agents._submit_via_tmux", return_value=True,
+            ) as submit_mock, \
+            mock.patch("metasphere.gateway.session.start_session", return_value=True):
+        ok = _sched.dispatch_to_agent(
+            "@orchestrator", "payload", paths=tmp_paths, job_name="j",
+        )
+
+    assert ok is True
+    spawn_mock.assert_not_called()
+    submit_mock.assert_called_once()
+
+
+def test_resolve_target_agent_does_not_double_prefix():
+    """jobs.json stores agent_id WITH the '@' ("@orchestrator") while this
+    function used to concatenate unconditionally, yielding "@@orchestrator".
+    That matches no agent dir, so every cron job failed the MISSION.md
+    lookup and fell through to inbox-only !task delivery — silently
+    discarding both `model` and `session_target`."""
+    def job(agent_id):
+        return _sched.Job(id="j", agent_id=agent_id)
+
+    assert _sched.resolve_target_agent(job("@orchestrator")) == "@orchestrator"
+    assert _sched.resolve_target_agent(job("orchestrator")) == "@orchestrator"
+    assert _sched.resolve_target_agent(job("")) == "@main"
+
+
+def test_fire_job_passes_session_target(tmp_paths):
+    """The manual-fire path is a second call site and was missed once
+    already — it must thread session_target like the scheduled path does."""
+    job = _sched.Job(
+        id="j1", name="j1", agent_id="@orchestrator", enabled=True,
+        payload_kind="agentTurn", payload_message="do it",
+        model="claude-haiku-4-5-20251001", session_target="isolated",
+    )
+    with mock.patch("metasphere.schedule.load_jobs", return_value=[job]), \
+            mock.patch("metasphere.schedule.dispatch_to_agent", return_value=True) as disp:
+        _sched.fire_job("j1", tmp_paths)
+
+    assert disp.call_args.kwargs["session_target"] == "isolated"
+    assert disp.call_args.kwargs["model"] == "claude-haiku-4-5-20251001"
