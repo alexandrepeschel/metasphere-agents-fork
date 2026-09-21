@@ -789,6 +789,53 @@ def test_restart_marker_survives_codex_selector_then_retries(
     assert not marker.exists()
 
 
+def test_restart_marker_throttles_deferred_events_but_logs_recovery(
+    tmp_paths: Paths, monkeypatch
+):
+    """Durable retries stay frequent while their event trail stays useful."""
+    import json as _json
+
+    now = 1_000_000
+    marker = gw_session._restart_marker_path(tmp_paths)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(_json.dumps({
+        "timestamp": now - gw_watchdog._RESTART_GRACE_S,
+        "reason": "test restart",
+        "agent": "@orchestrator",
+    }), encoding="utf-8")
+
+    submit = MagicMock(side_effect=[False] * 11 + [True])
+    events: list[str] = []
+    monkeypatch.setattr(gw_watchdog, "session_alive", lambda name=None: True)
+    monkeypatch.setattr("metasphere.telegram.inject.submit_to_tmux", submit)
+    monkeypatch.setattr(
+        gw_watchdog,
+        "log_event",
+        lambda _kind, message, **_kwargs: events.append(message),
+    )
+
+    for attempt in range(1, 12):
+        current = now + (attempt - 1) * gw_watchdog._RESTART_GRACE_S
+        assert gw_watchdog._check_restart_marker(
+            marker, tmp_paths, now=current
+        ) is False
+
+    retained = _json.loads(marker.read_text(encoding="utf-8"))
+    assert retained["attempts"] == 11
+    assert len(events) == 2
+    assert "attempt 1" in events[0]
+    assert "attempt 10" in events[1]
+
+    recovered_at = now + 11 * gw_watchdog._RESTART_GRACE_S
+    assert gw_watchdog._check_restart_marker(
+        marker, tmp_paths, now=recovered_at
+    ) is True
+    assert not marker.exists()
+    assert len(events) == 3
+    assert "after 11 deferrals" in events[-1]
+    assert submit.call_count == 12
+
+
 def test_pending_inbound_retries_until_confirmed(tmp_paths: Paths, monkeypatch):
     from metasphere.gateway import pending as gw_pending
 
