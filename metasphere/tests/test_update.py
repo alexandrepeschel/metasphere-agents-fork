@@ -729,10 +729,13 @@ def test_status_text_unconfigured(tmp_paths):
 
 def test_status_text_after_enable(tmp_paths):
     _update.save_config(AutoUpdateConfig(enabled=True, interval="hourly"), tmp_paths)
-    _update.register_job(AutoUpdateConfig(enabled=True, interval="hourly"), tmp_paths)
+    job = _update.register_job(
+        AutoUpdateConfig(enabled=True, interval="hourly"), tmp_paths
+    )
     out = _update.status_text(tmp_paths)
     assert "True" in out
     assert "0 * * * *" in out
+    assert f"job command:     {job.full_command}" in out
     assert "(not registered)" not in out
 
 

@@ -1240,6 +1240,8 @@ def status_text(paths: Paths | None = None) -> str:
         job = next((j for j in jobs if j.id == JOB_ID), None)
         if job:
             lines.append(f"  cron job:        {job.cron_expr} (enabled={job.enabled})")
+            command = job.full_command or job.command or job.payload_message
+            lines.append(f"  job command:     {command or '(missing)'}")
         else:
             lines.append("  cron job:        (not registered)")
     except Exception as e:  # pragma: no cover - defensive
