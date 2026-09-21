@@ -25,6 +25,7 @@ Never raises — returns False on failure.
 
 from __future__ import annotations
 
+import datetime as _dt
 import itertools
 import os
 import re
@@ -43,6 +44,16 @@ import time
 _SUBMIT_CONFIRM_TICKS = 4
 #: Max confirmed-submit ``C-m`` re-fires before giving up to the watchdog.
 _SUBMIT_CONFIRM_RETRIES = 3
+
+
+def _utcnow() -> str:
+    """Return a compact, sortable UTC timestamp for submit diagnostics."""
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _log_submit(message: str) -> None:
+    """Write an attributable tmux submission diagnostic to stderr."""
+    print(f"{_utcnow()} [tmux.submit] {message}", file=sys.stderr)
 
 
 def _confirmed_submit_disabled() -> bool:
@@ -420,18 +431,12 @@ def submit_to_tmux(
             == "codex"
         )
         if codex_runtime and _codex_startup_selector_in_pane(tmux, session):
-            print(
-                f"[tmux.submit] blocked: Codex startup selector in {session}",
-                file=sys.stderr,
-            )
+            _log_submit(f"blocked: Codex startup selector in {session}")
             return False
 
         if defer_if_busy and _input_line_has_typing(tmux, session):
             if session not in _deferring_sessions:
-                print(
-                    f"[tmux.submit] defer: input has typing in {session}",
-                    file=sys.stderr,
-                )
+                _log_submit(f"defer: input has typing in {session}")
                 _deferring_sessions.add(session)
             return False
 
@@ -631,10 +636,9 @@ def submit_to_tmux(
                 # is unreliable in Claude Code's TUI). Bare C-m never
                 # interrupts a running tool, so this is safe regardless
                 # of escape_prefix.
-                print(
-                    f"[tmux.submit] confirmed-submit re-fire C-m in {session} "
-                    f"(inline content stalled, submit eaten)",
-                    file=sys.stderr,
+                _log_submit(
+                    f"confirmed-submit re-fire C-m in {session} "
+                    f"(inline content stalled, submit eaten)"
                 )
                 subprocess.run(
                     [tmux, "send-keys", "-t", session, "C-m"],

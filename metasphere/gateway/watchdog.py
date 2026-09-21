@@ -563,6 +563,10 @@ _RESTART_GRACE_S = 8
 # If the marker is older than this, something went wrong — clear it
 # rather than injecting into a session that's been running for ages.
 _RESTART_STALE_S = 120
+# Failed continuation delivery remains durable, but repeated failures can
+# otherwise dominate the event stream. Record the first deferral and periodic
+# milestones; a later success is always recorded.
+_RESTART_DEFER_EVENT_EVERY = 10
 
 
 def _check_restart_marker(
@@ -633,6 +637,7 @@ def _check_restart_marker(
         defer_if_busy=True,
         escape_prefix=False,
     )
+    attempts = int(data.get("attempts", 0))
 
     if success:
         try:
@@ -645,22 +650,35 @@ def _check_restart_marker(
         # retry clock so it remains durable beyond the normal stale cutoff and
         # the next attempt still observes the startup grace period.
         data["timestamp"] = now
-        data["attempts"] = int(data.get("attempts", 0)) + 1
+        attempts += 1
+        data["attempts"] = attempts
         try:
             atomic_write_text(marker, json.dumps(data) + "\n")
         except OSError:
             pass
 
-    try:
-        outcome = "Injected" if success else "Deferred"
-        log_event(
-            "supervisor.restart_wake",
-            f"{outcome} continuation prompt for {agent} ({reason})",
-            agent="@daemon-supervisor",
-            paths=paths,
-        )
-    except Exception:
-        pass
+    should_log = (
+        success
+        or attempts == 1
+        or attempts % _RESTART_DEFER_EVENT_EVERY == 0
+    )
+    if should_log:
+        try:
+            outcome = "Injected" if success else "Deferred"
+            if success and attempts:
+                detail = f"{reason}; after {attempts} deferrals"
+            elif success:
+                detail = reason
+            else:
+                detail = f"{reason}; attempt {attempts}"
+            log_event(
+                "supervisor.restart_wake",
+                f"{outcome} continuation prompt for {agent} ({detail})",
+                agent="@daemon-supervisor",
+                paths=paths,
+            )
+        except Exception:
+            pass
 
     return success
 
