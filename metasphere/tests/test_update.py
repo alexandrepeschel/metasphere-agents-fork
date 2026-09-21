@@ -735,8 +735,26 @@ def test_status_text_after_enable(tmp_paths):
     out = _update.status_text(tmp_paths)
     assert "True" in out
     assert "0 * * * *" in out
-    assert f"job command:     {job.full_command}" in out
+    assert f"job command:     {job.payload_message}" in out
+    assert "command drift:" not in out
     assert "(not registered)" not in out
+
+
+def test_status_text_flags_effective_job_command_drift(tmp_paths):
+    cfg = AutoUpdateConfig(enabled=True, interval="hourly")
+    _update.save_config(cfg, tmp_paths)
+    registered = _update.register_job(cfg, tmp_paths)
+    stale_command = "/tmp/foreign-venv/bin/metasphere update --quiet"
+    with _sched.with_locked_jobs(tmp_paths) as jobs:
+        input_count = len(jobs)
+        job = next(job for job in jobs if job.id == _update.JOB_ID)
+        job.payload_message = stale_command
+        _sched.save_jobs(jobs, tmp_paths, _input_count=input_count)
+
+    out = _update.status_text(tmp_paths)
+
+    assert f"job command:     {stale_command}" in out
+    assert f"command drift:   expected {registered.payload_message}" in out
 
 
 # ---------- CLI dispatcher ----------

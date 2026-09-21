@@ -1240,8 +1240,13 @@ def status_text(paths: Paths | None = None) -> str:
         job = next((j for j in jobs if j.id == JOB_ID), None)
         if job:
             lines.append(f"  cron job:        {job.cron_expr} (enabled={job.enabled})")
-            command = job.full_command or job.command or job.payload_message
+            # The scheduler executes payload_message; command/full_command are
+            # descriptive compatibility fields and may have drifted apart.
+            command = job.payload_message or job.full_command or job.command
             lines.append(f"  job command:     {command or '(missing)'}")
+            expected_command = build_job(cfg, paths).payload_message
+            if command != expected_command:
+                lines.append(f"  command drift:   expected {expected_command}")
         else:
             lines.append("  cron job:        (not registered)")
     except Exception as e:  # pragma: no cover - defensive
