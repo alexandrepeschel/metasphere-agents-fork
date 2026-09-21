@@ -625,6 +625,27 @@ def _without_metasphere_codex_handlers(
     groups: object, managed_command: str
 ) -> list[object]:
     """Remove only our handlers, retaining custom handlers in their group."""
+    try:
+        managed_parts = shlex.split(managed_command)
+        subcommand = managed_parts[-1]
+    except (ValueError, IndexError):
+        subcommand = ""
+
+    def is_managed(command: object) -> bool:
+        if not isinstance(command, str):
+            return False
+        if command == managed_command:
+            return True
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return False
+        return (
+            len(parts) == 3
+            and Path(parts[0]).name == "metasphere"
+            and parts[1:] == ["hooks", subcommand]
+        )
+
     if not isinstance(groups, list):
         return []
     out: list[object] = []
@@ -636,8 +657,7 @@ def _without_metasphere_codex_handlers(
             handler for handler in group["hooks"]
             if not (
                 isinstance(handler, dict)
-                and isinstance(handler.get("command"), str)
-                and handler["command"] == managed_command
+                and is_managed(handler.get("command"))
             )
         ]
         if retained:

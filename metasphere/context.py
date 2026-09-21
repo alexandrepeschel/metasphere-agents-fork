@@ -143,31 +143,41 @@ def _read_persona_body(path: Path) -> str:
     return "\n".join(lines).strip()
 
 
-def _agent_file(paths: Paths, agent: str, *names: str) -> Path:
-    """Resolve one agent file with migration-safe per-file precedence.
-
-    Project-scoped identity is authoritative when it contains the requested
-    file.  A sparse duplicate no longer hides a richer global identity: each
-    missing file falls back independently to the global agent directory and
-    then to any remaining project-scoped candidates.
-    """
-    primary = paths.find_agent_dir(agent)
+def _agent_dirs(paths: Paths, agent: str) -> list[Path]:
+    """Return only the active-project and global directories for ``agent``."""
+    # Resolve only against the active project.  Agent ids are intentionally
+    # reusable across projects; scanning every project can inject another
+    # project's persona, task, or status into this turn.
+    from .project import load_project
+    project = load_project(paths.project_root, paths=paths)
+    primary = None
+    if project is not None:
+        scoped = paths.project_agent_dir(project.name, agent)
+        if scoped.is_dir():
+            primary = scoped
     candidates = [primary] if primary is not None else []
     global_dir = paths.agent_dir(agent)
     if global_dir not in candidates:
         candidates.append(global_dir)
-    if paths.projects.is_dir():
-        for project in sorted(paths.projects.iterdir()):
-            candidate = project / "agents" / agent
-            if candidate.is_dir() and candidate not in candidates:
-                candidates.append(candidate)
+    return candidates
+
+
+def _agent_file(paths: Paths, agent: str, *names: str) -> Path:
+    """Resolve one agent file with migration-safe per-file precedence.
+
+    The active project is authoritative when it contains the requested file.
+    A sparse duplicate no longer hides a richer global identity: each missing
+    file falls back independently to the global agent directory. Unrelated
+    projects are never searched.
+    """
+    candidates = _agent_dirs(paths, agent)
     for directory in candidates:
         for name in names:
             candidate = directory / name
             if candidate.is_file():
                 return candidate
     # Preserve a deterministic write/debug pointer when no file exists.
-    return (primary or global_dir) / names[0]
+    return candidates[0] / names[0]
 
 
 def _persona_sections(paths: Paths, agent: str) -> list[str]:
@@ -507,8 +517,8 @@ def _render_project_capsule(paths: Paths, agent: str) -> str:
     from .specs import _parse_frontmatter
     from .teams import _lookup_agent_projects
 
-    agent_dir = paths.find_agent_dir(agent) or paths.agent_dir(agent)
-    mission_file = agent_dir / "MISSION.md"
+    agent_dir = _agent_dirs(paths, agent)[0]
+    mission_file = _agent_file(paths, agent, "MISSION.md")
 
     declared: list[str] = []
     if mission_file.is_file():
@@ -594,7 +604,9 @@ def _render_project_capsule(paths: Paths, agent: str) -> str:
     return "\n\n".join(sections) + "\n"
 
 
-def _render_project_migration_nudge(paths: Paths, agent: str) -> str:
+def _render_project_migration_nudge(
+    paths: Paths, agent: str, *, persist: bool = True
+) -> str:
     """Cold-start nudge for agents whose agent-level LEARNINGS/MEMORY
     contain entries that look project-specific.
 
@@ -621,9 +633,9 @@ def _render_project_migration_nudge(paths: Paths, agent: str) -> str:
     Returns ``""`` when no agent-level files exist, no project tokens
     match, or the sentinel reports no change since last surfacing.
     """
-    agent_dir = paths.find_agent_dir(agent) or paths.agent_dir(agent)
-    learnings = agent_dir / "LEARNINGS.md"
-    memory = agent_dir / "MEMORY.md"
+    agent_dir = _agent_dirs(paths, agent)[0]
+    learnings = _agent_file(paths, agent, "LEARNINGS.md")
+    memory = _agent_file(paths, agent, "MEMORY.md")
     files = [f for f in (learnings, memory) if f.is_file()]
     if not files:
         return ""
@@ -672,6 +684,8 @@ def _render_project_migration_nudge(paths: Paths, agent: str) -> str:
                 total_hits += len(hits)
 
     def _persist_sentinel() -> None:
+        if not persist:
+            return
         try:
             sentinel.parent.mkdir(parents=True, exist_ok=True)
             sentinel.write_text(current_fp, encoding="utf-8")
@@ -696,8 +710,12 @@ def _render_project_migration_nudge(paths: Paths, agent: str) -> str:
 
 def _render_child_reports(paths: Paths, agent: str) -> str:
     """Show pending child agent completion reports (max 5)."""
-    agent_dir = paths.find_agent_dir(agent) or paths.agent_dir(agent)
-    reports_dir = agent_dir / "child_reports"
+    candidates = _agent_dirs(paths, agent)
+    reports_dir = next(
+        (directory / "child_reports" for directory in candidates
+         if (directory / "child_reports").is_dir()),
+        candidates[0] / "child_reports",
+    )
     if not reports_dir.is_dir():
         return ""
     try:
@@ -784,8 +802,8 @@ def _render_telegram(paths: Paths, history: int = 3) -> str:
 _MESSAGES_RENDER_CAP = 15
 
 
-def _render_messages(paths: Paths) -> str:
-    msgs = _msgs.collect_inbox(paths.scope, paths.project_root, view=True)
+def _render_messages(paths: Paths, *, view: bool = True) -> str:
+    msgs = _msgs.collect_inbox(paths.scope, paths.project_root, view=view)
     unread_msgs = [m for m in msgs if m.status == _msgs.STATUS_UNREAD]
     unread = len(unread_msgs)
     total = len(msgs)
@@ -903,7 +921,7 @@ def _auto_memory_dir_for_path(repo_path: str) -> Path | None:
     """
     if not repo_path:
         return None
-    slug = str(repo_path).replace("/", "-")
+    slug = re.sub(r"[/.]", "-", str(Path(repo_path).expanduser().resolve()))
     return Path.home() / ".claude" / "projects" / slug / "memory"
 
 
@@ -1078,8 +1096,13 @@ def _render_memory_fts(
         CamStrategy(
             fast=True,
             timeout=2.0,
+            # Ambient task/project/event terms help other strategies rank,
+            # but must never make a CAM transcript eligible. On user turns,
+            # only the actual prompt can anchor historical transcript recall;
+            # heartbeat/manual turns do not surface CAM-only history.
+            anchor_query=prompt,
             min_lexical_overlap=1,
-            max_eligible_hits=2,
+            max_eligible_hits=1,
         ),
         TokenOverlapStrategy(paths),
     ])]
@@ -1357,6 +1380,7 @@ def build_context(
     *,
     budget: int = DEFAULT_SECTION_BUDGET,
     prompt: str = "",
+    read_only: bool = False,
 ) -> str:
     """Assemble the per-turn context block. Section order is load-bearing.
 
@@ -1364,6 +1388,10 @@ def build_context(
     manual invocations). When present it leads the memory-recall query so
     recall is scored against what was just asked rather than only ambient
     state; when empty, recall falls back to the prior ambient-stem query.
+
+    ``read_only`` preserves the same visible context for direct Codex turns
+    while disabling inbox read receipts and migration-nudge cache writes.
+    Managed gateway/headless turns retain the existing bookkeeping behavior.
     """
     paths = paths or resolve()
     agent = resolve_agent_id(paths)
@@ -1391,7 +1419,9 @@ def build_context(
     sections.append(truncate_section(mission, budget) if mission else "")
     project_capsule = _render_project_capsule(paths, agent)
     sections.append(truncate_section(project_capsule, budget) if project_capsule else "")
-    migration_nudge = _render_project_migration_nudge(paths, agent)
+    migration_nudge = _render_project_migration_nudge(
+        paths, agent, persist=not read_only
+    )
     sections.append(truncate_section(migration_nudge, budget) if migration_nudge else "")
     drift = _render_drift_warning(paths)
     sections.append(truncate_section(drift, budget) if drift else "")
@@ -1402,7 +1432,9 @@ def build_context(
     sections.append(truncate_section(_render_telegram(paths), budget))
     child_reports = _render_child_reports(paths, agent)
     sections.append(truncate_section(child_reports, budget) if child_reports else "")
-    sections.append(truncate_section(_render_messages(paths), budget))
+    sections.append(truncate_section(
+        _render_messages(paths, view=not read_only), budget
+    ))
     sections.append(truncate_section(_render_tasks(paths), budget))
     sections.append(truncate_section(_render_events(paths), budget))
     last_edited = _render_last_edited_files(paths)

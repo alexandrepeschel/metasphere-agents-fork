@@ -95,7 +95,8 @@ def test_cam_automatic_gate_keeps_recurse_and_rejects_no_overlap(monkeypatch):
             "path": "claude/unrelated.md",
             "title": "Telegram maintenance",
             "keywords": ["telegram"],
-            "snippet": "Routine polling notes.",
+            # Incidental snippet text is not a durable lexical anchor.
+            "snippet": "Routine polling notes with a Recurse mention.",
             "score": 70.0,
         },
     ]
@@ -110,6 +111,27 @@ def test_cam_automatic_gate_keeps_recurse_and_rejects_no_overlap(monkeypatch):
     assert [hit.source for hit in recurse] == ["claude/old-recurse-session.md"]
     assert recurse[0].metadata["lexical_overlap"] == 1
     assert gated.search("frobnicate qzxv harmonica", limit=5) == []
+
+
+def test_cam_automatic_gate_anchors_only_on_current_prompt(monkeypatch):
+    monkeypatch.setattr("metasphere.memory.cam.shutil.which", lambda _b: "/bin/cam")
+    payload = [{
+        "path": "claude/metasphere-agents-maintenance.md",
+        "title": "metasphere agents maintenance",
+        "keywords": ["metasphere-agents"],
+        "snippet": "unrelated historical context",
+        "score": 99.0,
+    }]
+    monkeypatch.setattr(
+        "metasphere.memory.cam.subprocess.run",
+        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": json.dumps(payload)})(),
+    )
+    strategy = CamStrategy(
+        anchor_query="frobnicate qzxv",
+        min_lexical_overlap=1,
+        max_eligible_hits=1,
+    )
+    assert strategy.search("frobnicate qzxv metasphere-agents", limit=5) == []
 
 
 # ---------- HybridStrategy ----------

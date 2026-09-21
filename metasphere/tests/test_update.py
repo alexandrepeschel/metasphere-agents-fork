@@ -991,13 +991,23 @@ def test_sync_codex_hooks_installs_user_scope_and_cleans_legacy_layers(tmp_paths
     """Migration preserves custom hooks while removing duplicate old copies."""
     home = tmp_path / "home"
     home.mkdir()
+    user_hooks = home / ".codex" / "hooks.json"
+    user_hooks.parent.mkdir()
+    user_hooks.write_text(json.dumps({"hooks": {
+        "UserPromptSubmit": [{"matcher": "", "hooks": [
+            {"type": "command", "command": "/stale/bin/metasphere hooks context"},
+            {"type": "command", "command": "/custom/user-hook"},
+        ]}],
+    }}))
     legacy = tmp_paths.root / ".codex" / "hooks.json"
     legacy.parent.mkdir(parents=True)
     legacy.write_text(json.dumps({"hooks": {
         "UserPromptSubmit": [
             {"matcher": "", "hooks": [
                 {"type": "command", "command": "/old/metasphere hooks context"},
+                {"type": "command", "command": "'/old root/venv/bin/metasphere' hooks context"},
                 {"type": "command", "command": "/custom/same-group"},
+                {"type": "command", "command": "/opt/acme hooks context"},
             ]},
             {"hooks": [{"type": "command", "command": "/custom/prompt-hook"}]},
         ],
@@ -1009,10 +1019,14 @@ def test_sync_codex_hooks_installs_user_scope_and_cleans_legacy_layers(tmp_paths
     prompt_handler = user["hooks"]["UserPromptSubmit"][-1]["hooks"][0]
     assert prompt_handler["command"].endswith("metasphere hooks context")
     assert prompt_handler["additionalContextLimit"] == _update.CODEX_CONTEXT_LIMIT
+    assert user["hooks"]["UserPromptSubmit"][0]["hooks"] == [
+        {"type": "command", "command": "/custom/user-hook"}
+    ]
     migrated = json.loads(legacy.read_text())
     assert migrated["hooks"]["UserPromptSubmit"] == [
         {"matcher": "", "hooks": [
-            {"type": "command", "command": "/custom/same-group"}
+            {"type": "command", "command": "/custom/same-group"},
+            {"type": "command", "command": "/opt/acme hooks context"},
         ]},
         {"hooks": [{"type": "command", "command": "/custom/prompt-hook"}]}
     ]
@@ -1020,6 +1034,26 @@ def test_sync_codex_hooks_installs_user_scope_and_cleans_legacy_layers(tmp_paths
 
     # Re-running replaces our group in place without duplicating it.
     assert _update._sync_codex_hooks(tmp_paths, home) == 0
+
+
+def test_sync_codex_hooks_preserves_legacy_when_user_target_is_malformed(
+    tmp_paths, tmp_path
+):
+    home = tmp_path / "home"
+    user = home / ".codex" / "hooks.json"
+    user.parent.mkdir(parents=True)
+    user.write_text("{invalid")
+    legacy = tmp_paths.root / ".codex" / "hooks.json"
+    legacy.parent.mkdir(parents=True)
+    legacy_body = json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [{
+        "type": "command",
+        "command": f"{tmp_paths.root}/venv/bin/metasphere hooks context",
+    }]}]}})
+    legacy.write_text(legacy_body)
+
+    assert _update._sync_codex_hooks(tmp_paths, home) == 0
+    assert user.read_text() == "{invalid"
+    assert legacy.read_text() == legacy_body
 
 
 def test_run_update_restart_after_pip_reinstall(tmp_paths, monkeypatch):

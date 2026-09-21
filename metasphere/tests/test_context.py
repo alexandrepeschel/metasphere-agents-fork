@@ -534,6 +534,15 @@ def test_no_hits_affordance_anchored_to_project_root_not_pwd(
     assert "/-home-u/memory" not in out
 
 
+def test_auto_memory_dir_normalizes_dotted_project_segments(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".work" / "recurse.repo"
+    expected_slug = str(root.resolve()).replace("/", "-").replace(".", "-")
+    assert ctx._auto_memory_dir_for_path(str(root)) == (
+        tmp_path / ".claude" / "projects" / expected_slug / "memory"
+    )
+
+
 # --- Last-edited files section (2026-04-17) ---------------------------------
 
 
@@ -797,7 +806,7 @@ def _seed_project_agent_dir(tmp_paths: Paths, project: str, agent: str) -> Path:
 
 
 def test_voice_capsule_resolves_project_scoped_agent(tmp_paths: Paths):
-    d = _seed_project_agent_dir(tmp_paths, "acme", "@scoped")
+    d = _seed_project_agent_dir(tmp_paths, "testproj", "@scoped")
     (d / "SOUL.md").write_text("# soul\n\nproject-scoped voice.\n", encoding="utf-8")
     (d / "USER.md").write_text("# user\n\nproject-scoped user-model.\n", encoding="utf-8")
     out = ctx._render_voice_capsule(tmp_paths, "@scoped")
@@ -806,7 +815,7 @@ def test_voice_capsule_resolves_project_scoped_agent(tmp_paths: Paths):
 
 
 def test_mission_capsule_resolves_project_scoped_agent(tmp_paths: Paths):
-    d = _seed_project_agent_dir(tmp_paths, "acme", "@scoped")
+    d = _seed_project_agent_dir(tmp_paths, "testproj", "@scoped")
     (d / "MISSION.md").write_text(
         "# mission\n\nProject-scoped mission body line.\n", encoding="utf-8"
     )
@@ -816,7 +825,7 @@ def test_mission_capsule_resolves_project_scoped_agent(tmp_paths: Paths):
 
 
 def test_status_header_resolves_project_scoped_agent(tmp_paths: Paths):
-    d = _seed_project_agent_dir(tmp_paths, "acme", "@scoped")
+    d = _seed_project_agent_dir(tmp_paths, "testproj", "@scoped")
     (d / "status").write_text("active: persistent session", encoding="utf-8")
     out = ctx._render_status_header(tmp_paths, "@scoped")
     assert "active: persistent session" in out
@@ -826,7 +835,7 @@ def test_status_header_resolves_project_scoped_agent(tmp_paths: Paths):
 def test_voice_capsule_prefers_project_over_global(tmp_paths: Paths):
     # Both layers exist for the same id — project-scoped wins, matching
     # paths.find_agent_dir's tie-break.
-    proj_d = _seed_project_agent_dir(tmp_paths, "acme", "@dual")
+    proj_d = _seed_project_agent_dir(tmp_paths, "testproj", "@dual")
     (proj_d / "SOUL.md").write_text("# soul\n\nPROJECT-VOICE.\n", encoding="utf-8")
     glob_d = _seed_agent_dir(tmp_paths, "@dual")
     (glob_d / "SOUL.md").write_text("# soul\n\nGLOBAL-VOICE.\n", encoding="utf-8")
@@ -837,7 +846,7 @@ def test_voice_capsule_prefers_project_over_global(tmp_paths: Paths):
 
 def test_voice_capsule_sparse_project_duplicate_falls_back_per_file(tmp_paths: Paths):
     """A scoped SOUL override must not shadow global IDENTITY/USER files."""
-    proj_d = _seed_project_agent_dir(tmp_paths, "acme", "@dual")
+    proj_d = _seed_project_agent_dir(tmp_paths, "testproj", "@dual")
     (proj_d / "SOUL.md").write_text("# soul\n\nPROJECT-VOICE.\n", encoding="utf-8")
     glob_d = _seed_agent_dir(tmp_paths, "@dual")
     (glob_d / "IDENTITY.md").write_text("# identity\n\nGLOBAL-IDENTITY.\n", encoding="utf-8")
@@ -849,6 +858,17 @@ def test_voice_capsule_sparse_project_duplicate_falls_back_per_file(tmp_paths: P
     assert "PROJECT-VOICE." in out
     assert "GLOBAL-IDENTITY." in out
     assert "Current Project: Recurse" in out
+
+
+def test_voice_capsule_never_reads_duplicate_from_another_project(tmp_paths: Paths):
+    other = _seed_project_agent_dir(tmp_paths, "aaa-other", "@dual")
+    (other / "SOUL.md").write_text("# soul\n\nPRIVATE-OTHER-PROJECT.\n", encoding="utf-8")
+    active = _seed_project_agent_dir(tmp_paths, "testproj", "@dual")
+    (active / "SOUL.md").write_text("# soul\n\nACTIVE-PROJECT.\n", encoding="utf-8")
+
+    out = ctx._render_voice_capsule(tmp_paths, "@dual")
+    assert "ACTIVE-PROJECT." in out
+    assert "PRIVATE-OTHER-PROJECT." not in out
 
 
 def test_build_context_budgets_persona_files_independently(tmp_paths: Paths, monkeypatch):

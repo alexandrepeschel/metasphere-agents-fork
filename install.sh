@@ -1344,21 +1344,29 @@ seed_codex_hooks() {
         local tmp
         tmp=$(mktemp)
         if jq --arg ctx "$context_path" --arg post "$posthook_path" '
-            .hooks = (.hooks // {}) |
+            def groups: if type == "array" then . else [] end;
+            def is_ms($sub; $exact):
+              if type != "object" then false
+              else (.command // "") as $command |
+                ($command == $exact or ($command | test(
+                  "(^|/)metasphere[\"" + "\u0027" + "]? hooks " + $sub + "$"
+                )))
+              end;
+            def strip($sub; $exact): groups | map(
+              if type == "object" and (.hooks | type) == "array" then
+                .hooks |= map(select((is_ms($sub; $exact)) | not)) |
+                select((.hooks | length) > 0)
+              else . end
+            );
+            .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
             .hooks.UserPromptSubmit = (
-                [(.hooks.UserPromptSubmit // [])[] |
-                  .hooks = [.hooks[]? |
-                    select((.command // "") != $ctx)] |
-                  select((.hooks | length) > 0)]
+                ((.hooks.UserPromptSubmit | strip("context"; $ctx)))
                 + [{hooks: [{type: "command", command: $ctx,
                     statusMessage: "Loading Metasphere context",
                     additionalContextLimit: 12000}]}]
             ) |
             .hooks.Stop = (
-                [(.hooks.Stop // [])[] |
-                  .hooks = [.hooks[]? |
-                    select((.command // "") != $post)] |
-                  select((.hooks | length) > 0)]
+                ((.hooks.Stop | strip("posthook"; $post)))
                 + [{hooks: [{type: "command", command: $post,
                     statusMessage: "Forwarding response to Telegram"}]}]
             )
@@ -1384,15 +1392,23 @@ seed_codex_hooks() {
         [[ "$legacy_file" == "$target_file" || ! -f "$legacy_file" ]] && continue
         legacy_tmp=$(mktemp)
         if jq --arg ctx "$context_path" --arg post "$posthook_path" '
-            .hooks = (.hooks // {}) |
-            .hooks.UserPromptSubmit = [(.hooks.UserPromptSubmit // [])[] |
-              .hooks = [.hooks[]? |
-                select((.command // "") != $ctx)] |
-              select((.hooks | length) > 0)] |
-            .hooks.Stop = [(.hooks.Stop // [])[] |
-              .hooks = [.hooks[]? |
-                select((.command // "") != $post)] |
-              select((.hooks | length) > 0)] |
+            def groups: if type == "array" then . else [] end;
+            def is_ms($sub; $exact):
+              if type != "object" then false
+              else (.command // "") as $command |
+                ($command == $exact or ($command | test(
+                  "(^|/)metasphere[\"" + "\u0027" + "]? hooks " + $sub + "$"
+                )))
+              end;
+            def strip($sub; $exact): groups | map(
+              if type == "object" and (.hooks | type) == "array" then
+                .hooks |= map(select((is_ms($sub; $exact)) | not)) |
+                select((.hooks | length) > 0)
+              else . end
+            );
+            .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
+            .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit | strip("context"; $ctx)) |
+            .hooks.Stop = (.hooks.Stop | strip("posthook"; $post)) |
             if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end |
             if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end
         ' "$legacy_file" > "$legacy_tmp" 2>/dev/null; then

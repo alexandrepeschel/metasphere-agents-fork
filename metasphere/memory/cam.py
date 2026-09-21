@@ -36,8 +36,11 @@ def _anchor_tokens(text: str) -> set[str]:
 
 
 def _hit_anchor_text(result: dict) -> str:
+    # Snippets can contain incidental mentions from unrelated conversations.
+    # Eligibility is based on durable result metadata; snippets are rendered
+    # only after a title/path/keyword/entity anchor has made the hit eligible.
     values = [
-        result.get("path", ""), result.get("title", ""), result.get("snippet", "")
+        result.get("path", ""), result.get("title", "")
     ]
     for field in ("keywords", "entities"):
         value = result.get(field, [])
@@ -68,12 +71,14 @@ class CamStrategy(MemoryStrategy):
         timeout: float = 5.0,
         fast: bool = True,
         *,
+        anchor_query: str | None = None,
         min_lexical_overlap: int = 0,
         max_eligible_hits: int | None = None,
     ) -> None:
         self._binary = binary
         self._timeout = timeout
         self._fast = fast
+        self._anchor_query = anchor_query
         self._min_lexical_overlap = max(min_lexical_overlap, 0)
         self._max_eligible_hits = max_eligible_hits
 
@@ -104,7 +109,9 @@ class CamStrategy(MemoryStrategy):
         if not isinstance(raw, list):
             return []
 
-        query_tokens = _anchor_tokens(query)
+        query_tokens = _anchor_tokens(
+            query if self._anchor_query is None else self._anchor_query
+        )
         eligible: list[tuple[dict, int]] = []
         seen: set[tuple[str, str]] = set()
         for result in raw:

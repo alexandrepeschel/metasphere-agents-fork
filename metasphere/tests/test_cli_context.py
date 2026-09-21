@@ -143,6 +143,62 @@ def test_cli_context_codex_contract_uses_structured_additional_context(
     assert build.call_args.kwargs["prompt"] == "What did we decide about Recurse?"
 
 
+def test_cli_context_direct_codex_gets_context_without_managed_side_effects(
+    tmp_paths: Paths, monkeypatch, capsys
+):
+    monkeypatch.delenv("METASPHERE_GATEWAY_SESSION", raising=False)
+    event = {
+        "session_id": "direct-codex",
+        "turn_id": "turn-direct",
+        "cwd": str(tmp_paths.project_root),
+        "prompt": "help with this repository",
+    }
+    monkeypatch.setattr("sys.stdin", _FakeStdin(json.dumps(event).encode()))
+    with mock.patch(
+        "metasphere.cli.context.build_context", return_value="DIRECT-CONTEXT\n"
+    ) as build:
+        assert cli_context.main([]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["hookSpecificOutput"]["additionalContext"] == "DIRECT-CONTEXT\n"
+    assert build.call_args.kwargs["read_only"] is True
+    assert not (tmp_paths.agent_dir("@orchestrator") / "activity.json").exists()
+    assert _bc.read_breadcrumb(tmp_paths, "direct-codex") is None
+
+
+def test_cli_context_uses_hook_cwd_project_for_scoped_agent(
+    tmp_paths: Paths, tmp_path: Path, monkeypatch, capsys
+):
+    repo_b = tmp_path / "repo-b"
+    repo_b.mkdir()
+    registry = tmp_paths.root / "projects.json"
+    rows = json.loads(registry.read_text())
+    rows.append({"name": "project-b", "path": str(repo_b), "registered": "now"})
+    registry.write_text(json.dumps(rows))
+    project_dir = tmp_paths.projects / "project-b"
+    project_dir.mkdir(parents=True)
+    (project_dir / "project.json").write_text(json.dumps({
+        "schema": 2, "name": "project-b", "path": str(repo_b),
+        "created": "now", "status": "active",
+    }))
+    monkeypatch.setenv("METASPHERE_GATEWAY_SESSION", "1")
+    event = {
+        "session_id": "scoped-codex", "turn_id": "turn-scoped",
+        "cwd": str(repo_b), "prompt": "project B",
+    }
+    monkeypatch.setattr("sys.stdin", _FakeStdin(json.dumps(event).encode()))
+    with mock.patch(
+        "metasphere.cli.context.build_context", return_value="SCOPED\n"
+    ) as build:
+        assert cli_context.main([]) == 0
+
+    used_paths = build.call_args.args[0]
+    assert used_paths.project_root == repo_b.resolve()
+    assert used_paths.scope == repo_b.resolve()
+    assert build.call_args.kwargs["read_only"] is False
+    json.loads(capsys.readouterr().out)
+
+
 def test_codex_installed_limit_keeps_recurse_inline(
     tmp_paths: Paths, tmp_path: Path, monkeypatch, capsys
 ):

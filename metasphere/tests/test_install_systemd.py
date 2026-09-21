@@ -144,7 +144,8 @@ def test_install_sh_codex_hook_migration_is_user_scoped_and_handler_granular():
     assert "additionalContextLimit: 12000" in block
     # Filter handlers inside each group, then discard only empty groups. The
     # former whole-group `select(any(...))` form erased custom sibling hooks.
-    assert ".hooks = [.hooks[]?" in block
+    assert 'def strip($sub; $exact): groups | map(' in block
+    assert '.hooks |= map(select((is_ms($sub; $exact)) | not))' in block
     assert "select((.hooks | length) > 0)" in block
     assert "select(any(.hooks[]?" not in block
 
