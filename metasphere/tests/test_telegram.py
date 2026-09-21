@@ -1343,6 +1343,30 @@ def test_handle_update_wakes_for_group_mention(tmp_path, monkeypatch,
     assert "@mybot meet" in tmux_log[0]["text"]
 
 
+def test_handle_update_queues_failed_addressed_delivery(
+    tmp_path, monkeypatch, _bot_identity_stub
+):
+    _patch_handle_update(monkeypatch, tmp_path)
+    queued: list[dict] = []
+    u = _build_message_update(
+        chat_type="private",
+        text="survive the startup selector",
+        chat_id=123,
+        update_id=5100,
+    )
+
+    _handler.handle_update(
+        u,
+        tmux_submit=lambda *args, **kwargs: False,
+        write_pending_inbound=lambda **kwargs: queued.append(kwargs),
+    )
+
+    assert len(queued) == 1
+    assert queued[0]["delivery_id"] == "telegram:5100:@orchestrator"
+    assert queued[0]["text"] == "survive the startup selector"
+    assert queued[0]["session"] == "metasphere-orchestrator"
+
+
 def test_handle_update_addressed_group_calls_start_session(
         tmp_path, monkeypatch, _bot_identity_stub):
     """Addressed group inbound triggers start_session before inject so
@@ -1451,4 +1475,3 @@ def test_load_token_legacy_surface_still_prefers_global_env_var(
     monkeypatch.setenv('HOME', str(tmp_path))
     assert api._load_token(surface_id=None) == 'global-env-token'
     assert api._load_token(surface_id='telegram') == 'global-env-token'
-

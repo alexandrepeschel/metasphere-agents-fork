@@ -600,8 +600,7 @@ Commands:
   ensure                 Start the orchestrator session if it is not
                          already alive.
   status                 Print orchestrator session liveness + idle.
-  restart                Restart the agent REPL inside the orchestrator
-                         session (preserves the tmux pane).
+  restart                Recreate the orchestrator tmux session and REPL.
 ```
 
 ### `metasphere daemon`

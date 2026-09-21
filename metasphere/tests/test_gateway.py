@@ -141,6 +141,31 @@ def test_start_session_does_not_hardcode_codex_model(
     assert "model_reasoning_effort" not in launch[3]
 
 
+def test_start_session_cleans_up_when_runtime_send_fails(
+    tmp_paths: Paths, monkeypatch
+):
+    calls: list[tuple[str, ...]] = []
+
+    def fake_tmux(*args):
+        calls.append(args)
+        failed = args[:3] == (
+            "send-keys", "-t", gw_session.SESSION_NAME
+        ) and any("codex --no-alt-screen" in arg for arg in args)
+        return MagicMock(
+            returncode=1 if failed else 0,
+            stdout="",
+            stderr="launch failed" if failed else "",
+        )
+
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.setattr(gw_session, "session_alive", lambda name=None: False)
+    monkeypatch.setattr(gw_session, "_tmux", fake_tmux)
+
+    assert gw_session.start_session(tmp_paths) is False
+    assert ("kill-session", "-t", gw_session.SESSION_NAME) in calls
+    assert not gw_session._restart_marker_path(tmp_paths).exists()
+
+
 # ---------------------------------------------------------------------------
 # Watchdog: stuck paste
 # ---------------------------------------------------------------------------
@@ -714,6 +739,75 @@ def test_check_restart_marker_uses_project_scoped_session(tmp_paths: Paths):
         f"expected project-aware session name, "
         f"got {captured.get('session')!r}"
     )
+
+
+def test_restart_marker_survives_codex_selector_then_retries(
+    tmp_paths: Paths, monkeypatch
+):
+    """Selector blocking and restart retry must compose without losing wake."""
+    import json as _json
+    from metasphere import tmux as tmux_module
+
+    now = 1_000_000
+    marker = gw_session._restart_marker_path(tmp_paths)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(_json.dumps({
+        "timestamp": now - 10,
+        "reason": "test restart",
+        "agent": "@orchestrator",
+    }), encoding="utf-8")
+
+    selector_visible = iter((True, False))
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.setattr(gw_watchdog, "session_alive", lambda name=None: True)
+    monkeypatch.setattr(tmux_module, "_find_tmux", lambda: "/usr/bin/tmux")
+    monkeypatch.setattr(tmux_module, "_has_session", lambda *_args: True)
+    monkeypatch.setattr(
+        tmux_module,
+        "_codex_startup_selector_in_pane",
+        lambda *_args: next(selector_visible),
+    )
+    monkeypatch.setattr(tmux_module, "_has_pending_paste", lambda *_args: False)
+    monkeypatch.setattr(tmux_module, "_input_line_has_typing", lambda *_args: False)
+    monkeypatch.setattr(tmux_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        tmux_module.subprocess,
+        "run",
+        lambda *args, **kwargs: MagicMock(returncode=0, stdout="", stderr=""),
+    )
+
+    assert gw_watchdog._check_restart_marker(
+        marker, tmp_paths, now=now
+    ) is False
+    retained = _json.loads(marker.read_text(encoding="utf-8"))
+    assert retained["timestamp"] == now
+    assert retained["attempts"] == 1
+
+    assert gw_watchdog._check_restart_marker(
+        marker, tmp_paths, now=now + gw_watchdog._RESTART_GRACE_S
+    ) is True
+    assert not marker.exists()
+
+
+def test_pending_inbound_retries_until_confirmed(tmp_paths: Paths, monkeypatch):
+    from metasphere.gateway import pending as gw_pending
+
+    marker = gw_pending.enqueue_inbound(
+        delivery_id="telegram:42:@orchestrator",
+        from_user="@operator",
+        text="do not lose this",
+        session=gw_session.SESSION_NAME,
+        paths=tmp_paths,
+    )
+    submit = MagicMock(side_effect=[False, True])
+    monkeypatch.setattr("metasphere.telegram.inject.submit_to_tmux", submit)
+
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 0
+    assert marker.exists()
+    assert gw_pending.retry_pending_inbound(tmp_paths) == 1
+    assert not marker.exists()
+    assert submit.call_count == 2
+    assert submit.call_args.kwargs["escape_prefix"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1370,6 +1464,59 @@ def test_runtime_command_quotes_codex_reasoning_config():
     # The quote is escaped inside one shell-quoted TOML assignment rather
     # than becoming a second Codex config statement.
     assert r'\"; unsafe=true' in command
+
+
+def test_respawn_command_preserves_adversarial_codex_values(
+    tmp_path, monkeypatch
+):
+    """Exercise both shell boundaries and assert argv is preserved exactly."""
+    import json as _json
+    import os as _os
+    import subprocess as _subprocess
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "argv.json"
+    pwned = tmp_path / "pwned"
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['ARGV_CAPTURE'], 'w') as fh:\n"
+        "    json.dump(sys.argv[1:], fh)\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+
+    model = f"model'; $(touch {pwned})\nnext"
+    effort = f'high"; $(touch {pwned})\nunsafe=true'
+    command = gw_session._respawn_cmd(
+        "@one-shot",
+        runtime="codex",
+        model=model,
+        reasoning_effort=effort,
+        agent_class="ephemeral",
+    )
+    env = _os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["ARGV_CAPTURE"] = str(capture)
+    result = _subprocess.run(
+        ["/bin/bash", "-c", command],
+        stdin=_subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = _json.loads(capture.read_text(encoding="utf-8"))
+    assert argv[argv.index("--model") + 1] == model
+    assert argv[argv.index("--config") + 1] == (
+        f"model_reasoning_effort={_json.dumps(effort)}"
+    )
+    assert not pwned.exists()
 
 
 def test_respawn_cmd_codex_project_agent_does_not_bypass_hook_trust():

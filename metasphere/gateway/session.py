@@ -126,8 +126,7 @@ def _respawn_cmd(
         # No respawn loop. ``exec bash`` after claude exits leaves the
         # pane idle at an interactive shell so reap_ephemeral_idle can
         # collect it on its session_activity timer.
-        return (
-            "exec bash -c '"
+        script = (
             # PREFER an already-exported METASPHERE_PROJECT_ROOT (both managed
             # launch paths set the correct repo root just before invoking this
             # command — see create-session in this module and env_export in
@@ -149,11 +148,10 @@ def _respawn_cmd(
             f"{runtime_command}; "
             f'ec=$?; echo "[gateway] {runtime_name} exited ($ec), ephemeral — pane idle for reap"; '
             "exec bash"
-            "'"
         )
+        return "exec bash -c " + shlex.quote(script)
 
-    return (
-        "exec bash -c '"
+    script = (
         'STATE_DIR="$HOME/.metasphere/state"; '
         "mkdir -p \"$STATE_DIR\"; "
         "while true; do "
@@ -190,8 +188,9 @@ def _respawn_cmd(
         '}" '
         f'> "$STATE_DIR/restart_pending.{safe_agent}.json"; '
         "sleep 1; "
-        "done'"
+        "done"
     )
+    return "exec bash -c " + shlex.quote(script)
 
 
 def _tmux_bin() -> str:
@@ -302,8 +301,14 @@ def start_session(paths: Paths | None = None) -> bool:
     # value over a cwd-keyed git shell-out, so it must be the authoritative
     # project_root — otherwise everything keyed on project_root inherits the
     # wrong dir. shlex-quoted so a path with spaces can't split the command.
-    _tmux("send-keys", "-t", SESSION_NAME,
-          f"export METASPHERE_PROJECT_ROOT={shlex.quote(str(paths.project_root))}", "Enter")
+    exported_root = _tmux(
+        "send-keys", "-t", SESSION_NAME,
+        f"export METASPHERE_PROJECT_ROOT={shlex.quote(str(paths.project_root))}",
+        "Enter",
+    )
+    if exported_root.returncode != 0:
+        _tmux("kill-session", "-t", SESSION_NAME)
+        return False
     # Build at session-creation time rather than module import time. The
     # selected runtime is supplied by the service environment and may change
     # when an operator updates/restarts the gateway. Caching this command at
@@ -325,10 +330,13 @@ def start_session(paths: Paths | None = None) -> bool:
             runtime_options["model"] = model
         if reasoning_effort:
             runtime_options["reasoning_effort"] = reasoning_effort
-    _tmux(
+    launched = _tmux(
         "send-keys", "-t", SESSION_NAME,
         _respawn_cmd("@orchestrator", **runtime_options), "Enter",
     )
+    if launched.returncode != 0:
+        _tmux("kill-session", "-t", SESSION_NAME)
+        return False
 
     # Write restart marker so watchdog injects a wake-up prompt into the
     # fresh instance (same path as restart_session — new sessions need a

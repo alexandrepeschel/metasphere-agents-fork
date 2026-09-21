@@ -26,6 +26,7 @@ Reactor = Callable[..., object]
 TmuxSubmit = Callable[..., bool]
 ChatIdSaver = Callable[[int], None]
 PendingAckWriter = Callable[[int, int], None]
+PendingInboundWriter = Callable[..., object]
 # (chat_id, username) -> (agent_id, allowed, deny_message_or_None)
 TargetResolver = Callable[..., routing.Resolution]
 
@@ -103,6 +104,16 @@ def _default_pending_ack_writer(chat_id: int, message_id: int) -> None:
         pass
 
 
+def _default_pending_inbound_writer(**kwargs) -> None:
+    """Queue an addressed inbound message when immediate tmux delivery fails."""
+    try:
+        from ..gateway.pending import enqueue_inbound
+
+        enqueue_inbound(**kwargs)
+    except Exception:
+        pass
+
+
 def handle_update(
     u: poller.Update,
     *,
@@ -111,6 +122,7 @@ def handle_update(
     tmux_submit: Optional[TmuxSubmit] = None,
     save_chat_id: Optional[ChatIdSaver] = None,
     write_pending_ack: Optional[PendingAckWriter] = None,
+    write_pending_inbound: Optional[PendingInboundWriter] = None,
     resolve_target: Optional[TargetResolver] = None,
     surface_id: str = "telegram",
     target_agent_id: str = "@orchestrator",
@@ -137,6 +149,9 @@ def handle_update(
     tmux_submit = tmux_submit or inject.submit_to_tmux
     save_chat_id = save_chat_id or _default_save_chat_id
     write_pending_ack = write_pending_ack or _default_pending_ack_writer
+    write_pending_inbound = (
+        write_pending_inbound or _default_pending_inbound_writer
+    )
     resolve_target = resolve_target or routing.resolve_target
 
     if u.kind == "reaction":
@@ -399,7 +414,8 @@ def handle_update(
     # defer_if_busy stays False: telegram-user inbound must land even when the
     # REPL input box shows typed content (that is precisely what the user is
     # replacing). The lower-level Codex startup-selector safety gate is the
-    # intentional exception; the archived message is retried via later context.
+    # intentional exception; a failed addressed delivery is persisted below
+    # and retried by the watchdog until tmux confirms it landed.
     # Setting defer_if_busy=True silently dropped user messages
     # whenever the pane had typed content — the 2026-04-16 PR #23 regression
     # guarded by test_handle_update_telegram_inject_does_not_defer. So only the
@@ -407,7 +423,16 @@ def handle_update(
     #
     # Trade-off: telegram no longer interrupts a running turn; a deliberate
     # mid-turn stop would need an explicit /stop command (follow-up).
-    tmux_submit(
+    delivered = tmux_submit(
         f"@{u.from_username or 'user'}", payload,
         session=target_session, defer_if_busy=False, escape_prefix=False,
     )
+    if delivered is False:
+        write_pending_inbound(
+            delivery_id=f"{surface_id}:{u.update_id}:{target_agent_id}",
+            from_user=f"@{u.from_username or 'user'}",
+            text=payload,
+            session=target_session,
+            surface_id="telegram",
+            reply_command=None,
+        )
