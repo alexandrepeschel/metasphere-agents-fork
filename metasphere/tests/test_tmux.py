@@ -115,6 +115,18 @@ def test_submit_typing_sequence_unchanged_after_prefix(monkeypatch):
     assert any(c[-1] == "C-m" for c in sendkeys)
 
 
+def test_submit_uses_true_bracketed_paste(monkeypatch):
+    """``paste-buffer -p`` wraps payloads in bracketed-paste markers."""
+    calls = _capture_calls(monkeypatch)
+
+    assert T.submit_to_tmux(
+        "sess", "context\n" * 200, escape_prefix=False
+    ) is True
+
+    paste = next(call for call in calls if "paste-buffer" in call)
+    assert "-p" in paste
+
+
 def _buffer_name(calls, verb):
     for c in calls:
         if verb in c and "-b" in c:
@@ -398,6 +410,38 @@ def test_codex_prompt_detects_real_typing(monkeypatch):
     monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
     monkeypatch.setattr("subprocess.run", fake_run)
     assert T._input_line_has_typing("/usr/bin/tmux", "sess") is True
+
+
+def test_submit_never_pastes_into_codex_startup_selector(monkeypatch):
+    pane = """
+  Select Model and Effort
+
+› 1. gpt-5.6-sol
+  2. gpt-5.5
+
+  Press enter to confirm
+"""
+    calls = _capture_calls(monkeypatch, pane_states=[pane])
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", " codex ")
+
+    assert T.submit_to_tmux("sess", "large context\n" * 200) is False
+    assert not any("load-buffer" in call for call in calls)
+    assert not any("paste-buffer" in call for call in calls)
+    assert not any("send-keys" in call for call in calls)
+
+
+def test_codex_selector_text_in_scrollback_does_not_block(monkeypatch):
+    pane = """
+  Select Reasoning Level for gpt-5.6-sol
+  Press enter to confirm
+
+› Ask Codex to do anything
+"""
+    calls = _capture_calls(monkeypatch, pane_states=[pane])
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+
+    assert T.submit_to_tmux("sess", "hello", escape_prefix=False) is True
+    assert any("paste-buffer" in call for call in calls)
 
 
 def test_input_line_has_typing_fails_open_on_error(monkeypatch):

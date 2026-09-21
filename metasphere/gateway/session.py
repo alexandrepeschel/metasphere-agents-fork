@@ -43,6 +43,7 @@ SESSION_NAME = "metasphere-orchestrator"
 def _runtime_command(
     *,
     model: str = "",
+    reasoning_effort: str = "",
     runtime: str | None = None,
     trust_hooks: bool = False,
 ) -> tuple[str, str]:
@@ -63,6 +64,11 @@ def _runtime_command(
             parts.append("--dangerously-bypass-hook-trust")
         if model:
             parts.extend(["--model", shlex.quote(model)])
+        if reasoning_effort:
+            # JSON string syntax is also valid TOML and safely escapes quotes
+            # or control characters supplied through the service environment.
+            config = f"model_reasoning_effort={json.dumps(reasoning_effort)}"
+            parts.extend(["--config", shlex.quote(config)])
         return " ".join(parts), "codex"
     raise ValueError(f"unsupported agent runtime: {selected}")
 
@@ -78,6 +84,7 @@ def _respawn_cmd(
     agent: str = "@orchestrator",
     *,
     model: str = "",
+    reasoning_effort: str = "",
     agent_class: str = "persistent",
     runtime: str | None = None,
 ) -> str:
@@ -110,6 +117,7 @@ def _respawn_cmd(
     # arbitrary .codex hooks, so they must use Codex's normal trust gate.
     runtime_command, runtime_name = _runtime_command(
         model=model,
+        reasoning_effort=reasoning_effort,
         runtime=runtime,
         trust_hooks=agent == "@orchestrator",
     )
@@ -300,7 +308,27 @@ def start_session(paths: Paths | None = None) -> bool:
     # selected runtime is supplied by the service environment and may change
     # when an operator updates/restarts the gateway. Caching this command at
     # import time left newly-created sessions on the old runtime/flags.
-    _tmux("send-keys", "-t", SESSION_NAME, _respawn_cmd("@orchestrator"), "Enter")
+    selected_runtime = os.environ.get(
+        "METASPHERE_AGENT_RUNTIME", "claude"
+    ).strip().lower()
+    runtime_options: dict[str, str] = {"runtime": selected_runtime}
+    if selected_runtime == "codex":
+        # Optional explicit selectors prevent Codex upgrade/new-model prompts
+        # in unattended panes.  Do not bake model names into the package:
+        # operators that omit these settings retain normal Codex config
+        # resolution and future model compatibility.
+        model = os.environ.get("METASPHERE_ORCHESTRATOR_CODEX_MODEL", "").strip()
+        reasoning_effort = os.environ.get(
+            "METASPHERE_ORCHESTRATOR_CODEX_REASONING_EFFORT", ""
+        ).strip()
+        if model:
+            runtime_options["model"] = model
+        if reasoning_effort:
+            runtime_options["reasoning_effort"] = reasoning_effort
+    _tmux(
+        "send-keys", "-t", SESSION_NAME,
+        _respawn_cmd("@orchestrator", **runtime_options), "Enter",
+    )
 
     # Write restart marker so watchdog injects a wake-up prompt into the
     # fresh instance (same path as restart_session — new sessions need a
@@ -430,9 +458,35 @@ def restart_agent_session(
     return True
 
 
-def restart_session(reason: str, paths: Paths | None = None) -> None:
-    """Restart the orchestrator session. Backward-compat wrapper."""
-    restart_agent_session("@orchestrator", reason, SESSION_NAME, paths)
+def restart_session(reason: str, paths: Paths | None = None) -> bool:
+    """Replace the orchestrator tmux session and its process tree.
+
+    A wedged TUI may ignore the in-band ``/exit`` used for ordinary agent
+    restarts.  Killing this narrowly scoped session gives the supervisor an
+    observable restart primitive without affecting project-agent sessions.
+    """
+    paths = paths or resolve()
+    try:
+        log_event(
+            "supervisor.restart_orchestrator",
+            f"recreating {SESSION_NAME}: {reason}",
+            agent="@daemon-supervisor",
+            paths=paths,
+        )
+    except Exception:
+        pass
+
+    if session_alive(SESSION_NAME):
+        result = _tmux("kill-session", "-t", SESSION_NAME)
+        if result.returncode != 0:
+            return False
+
+    started = start_session(paths)
+    if started:
+        # start_session writes a generic creation marker; retain the actual
+        # operator/supervisor reason for the continuation prompt.
+        _write_restart_pending(paths, reason, agent="@orchestrator")
+    return started
 
 
 def ensure_session(paths: Paths | None = None) -> None:

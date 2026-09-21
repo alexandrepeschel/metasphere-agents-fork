@@ -420,8 +420,8 @@ def cmd_schedule(args: str, ctx: Context) -> str:
 def cmd_session(args: str, ctx: Context) -> str:
     """Restart the orchestrator REPL so it picks up new CLAUDE.md / hooks.
 
-    Default action is ``restart``. The respawn loop in metasphere-gateway
-    revives Claude automatically after /exit, so this is fire-and-forget.
+    Default action is ``restart``. The gateway recreates the narrowly scoped
+    orchestrator tmux session so recovery does not depend on a responsive TUI.
 
     Subcommands:
       restart  -> metasphere-gateway restart-orchestrator (default)
@@ -435,8 +435,9 @@ def cmd_session(args: str, ctx: Context) -> str:
             from metasphere.gateway.session import restart_session
             from metasphere.paths import resolve
 
-            restart_session("Telegram /session restart", resolve())
-            return "Restarting orchestrator REPL (respawn loop will revive it)."
+            if restart_session("Telegram /session restart", resolve()):
+                return "Recreated orchestrator session and REPL."
+            return "(restart error: failed to recreate orchestrator session)"
         except Exception as e:
             return f"(restart error: {e})"
     return f"Unknown /session subcommand: {sub}\nUsage: /session [restart|status]"

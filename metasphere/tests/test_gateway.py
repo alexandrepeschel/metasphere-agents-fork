@@ -94,6 +94,10 @@ def test_start_session_builds_runtime_command_at_creation_time(
         return MagicMock(returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.setenv("METASPHERE_ORCHESTRATOR_CODEX_MODEL", "future-model")
+    monkeypatch.setenv(
+        "METASPHERE_ORCHESTRATOR_CODEX_REASONING_EFFORT", "high"
+    )
     with patch.object(gw_session, "session_alive", return_value=False), \
          patch.object(gw_session, "_tmux", side_effect=fake_tmux):
         assert gw_session.start_session(tmp_paths) is True
@@ -105,6 +109,36 @@ def test_start_session_builds_runtime_command_at_creation_time(
     ]
     assert len(launch) == 1
     assert "--dangerously-bypass-hook-trust" in launch[0][3]
+    assert "--model future-model" in launch[0][3]
+    assert "model_reasoning_effort" in launch[0][3]
+    assert "high" in launch[0][3]
+
+
+def test_start_session_does_not_hardcode_codex_model(
+    tmp_paths: Paths, monkeypatch
+):
+    calls: list[tuple[str, ...]] = []
+
+    def fake_tmux(*args):
+        calls.append(args)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("METASPHERE_AGENT_RUNTIME", "codex")
+    monkeypatch.delenv("METASPHERE_ORCHESTRATOR_CODEX_MODEL", raising=False)
+    monkeypatch.delenv(
+        "METASPHERE_ORCHESTRATOR_CODEX_REASONING_EFFORT", raising=False
+    )
+    with patch.object(gw_session, "session_alive", return_value=False), \
+         patch.object(gw_session, "_tmux", side_effect=fake_tmux):
+        assert gw_session.start_session(tmp_paths) is True
+
+    launch = next(
+        call for call in calls
+        if call[:3] == ("send-keys", "-t", gw_session.SESSION_NAME)
+        and any("codex --no-alt-screen" in arg for arg in call)
+    )
+    assert "--model" not in launch[3]
+    assert "model_reasoning_effort" not in launch[3]
 
 
 # ---------------------------------------------------------------------------
@@ -1326,6 +1360,18 @@ def test_respawn_cmd_codex_runtime_uses_interactive_tmux_flags():
     assert "[gateway] codex exited" in cmd
 
 
+def test_runtime_command_quotes_codex_reasoning_config():
+    command, runtime = gw_session._runtime_command(
+        runtime="codex",
+        reasoning_effort='high"; unsafe=true',
+    )
+    assert runtime == "codex"
+    assert "model_reasoning_effort" in command
+    # The quote is escaped inside one shell-quoted TOML assignment rather
+    # than becoming a second Codex config statement.
+    assert r'\"; unsafe=true' in command
+
+
 def test_respawn_cmd_codex_project_agent_does_not_bypass_hook_trust():
     cmd = gw_session._respawn_cmd("@project-worker", runtime="codex")
     assert "codex --no-alt-screen" in cmd
@@ -1418,6 +1464,41 @@ def test_respawn_cmd_ephemeral_with_model():
     )
     assert "while true" not in cmd
     assert "--model claude-haiku-4-5" in cmd
+
+
+def test_restart_session_recreates_orchestrator_tmux(tmp_paths, monkeypatch):
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(gw_session, "session_alive", lambda name=None: True)
+    monkeypatch.setattr(
+        gw_session,
+        "_tmux",
+        lambda *args: (
+            calls.append(args)
+            or MagicMock(returncode=0, stdout="", stderr="")
+        ),
+    )
+    start = MagicMock(return_value=True)
+    monkeypatch.setattr(gw_session, "start_session", start)
+
+    assert gw_session.restart_session("test reason", tmp_paths) is True
+    assert calls == [("kill-session", "-t", gw_session.SESSION_NAME)]
+    start.assert_called_once_with(tmp_paths)
+    marker = gw_session._restart_marker_path(tmp_paths)
+    assert "test reason" in marker.read_text(encoding="utf-8")
+
+
+def test_restart_session_stops_if_tmux_kill_fails(tmp_paths, monkeypatch):
+    monkeypatch.setattr(gw_session, "session_alive", lambda name=None: True)
+    monkeypatch.setattr(
+        gw_session,
+        "_tmux",
+        lambda *args: MagicMock(returncode=1, stdout="", stderr="failed"),
+    )
+    start = MagicMock(return_value=True)
+    monkeypatch.setattr(gw_session, "start_session", start)
+
+    assert gw_session.restart_session("test", tmp_paths) is False
+    start.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

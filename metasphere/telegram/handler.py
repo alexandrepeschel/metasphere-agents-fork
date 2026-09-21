@@ -396,9 +396,11 @@ def handle_update(
     # the current turn finishes — the same safe path every auto-injector
     # (heartbeat/wake/posthook) already uses.
     #
-    # defer_if_busy stays False: telegram-user inbound must ALWAYS land, even
-    # when the REPL input box shows typed content (that is precisely what the
-    # user is replacing). Setting it True silently dropped user messages
+    # defer_if_busy stays False: telegram-user inbound must land even when the
+    # REPL input box shows typed content (that is precisely what the user is
+    # replacing). The lower-level Codex startup-selector safety gate is the
+    # intentional exception; the archived message is retried via later context.
+    # Setting defer_if_busy=True silently dropped user messages
     # whenever the pane had typed content — the 2026-04-16 PR #23 regression
     # guarded by test_handle_update_telegram_inject_does_not_defer. So only the
     # interrupt behaviour changes here, not the delivery guarantee.

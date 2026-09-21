@@ -156,6 +156,56 @@ def _codex_prompt_content(styled_pane: str) -> str | None:
     return None
 
 
+def _codex_startup_selector_visible(styled_pane: str) -> bool:
+    """Return whether Codex's model/reasoning startup selector is live.
+
+    Require both a selector title and its confirmation footer in the visible
+    tail.  A normal chat prompt rendered *after* the footer means the selector
+    is only scrollback.  Selector option cursors may themselves start with
+    ``›``, so prompts before the footer do not disqualify the match.
+    """
+    plain_lines = _ANSI_RE.sub("", styled_pane).splitlines()[-30:]
+    title_indexes = [
+        index
+        for index, line in enumerate(plain_lines)
+        if (
+            "Select Model and Effort" in line
+            or "Select Reasoning Level" in line
+        )
+    ]
+    footer_indexes = [
+        index
+        for index, line in enumerate(plain_lines)
+        if "enter to confirm" in line.lower()
+    ]
+    if not title_indexes or not footer_indexes:
+        return False
+
+    footer_index = footer_indexes[-1]
+    if not any(title_index < footer_index for title_index in title_indexes):
+        return False
+    return not any(
+        line.strip().startswith("›")
+        for line in plain_lines[footer_index + 1:]
+    )
+
+
+def _codex_startup_selector_in_pane(tmux: str, session: str) -> bool:
+    try:
+        result = subprocess.run(
+            [tmux, "capture-pane", "-p", "-e", "-t", session],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return (
+            result.returncode == 0
+            and _codex_startup_selector_visible(result.stdout)
+        )
+    except OSError:
+        return False
+
+
 def _input_line_has_typing(tmux: str, session: str) -> bool:
     """Inspect the pane and return True if the input box shows
     user-typed content (mid-typing human, or mid-inject residue).
@@ -362,6 +412,20 @@ def submit_to_tmux(
         if not _has_session(tmux, session):
             return False
 
+        # Codex startup selectors interpret pasted text as navigation key
+        # events. Block every Codex injection path until the chat prompt is
+        # ready, including user-inbound paths that skip the busy-input guard.
+        codex_runtime = (
+            os.environ.get("METASPHERE_AGENT_RUNTIME", "").strip().lower()
+            == "codex"
+        )
+        if codex_runtime and _codex_startup_selector_in_pane(tmux, session):
+            print(
+                f"[tmux.submit] blocked: Codex startup selector in {session}",
+                file=sys.stderr,
+            )
+            return False
+
         if defer_if_busy and _input_line_has_typing(tmux, session):
             if session not in _deferring_sessions:
                 print(
@@ -458,7 +522,7 @@ def submit_to_tmux(
             check=False,
         )
         subprocess.run(
-            [tmux, "paste-buffer", "-b", buf,
+            [tmux, "paste-buffer", "-p", "-b", buf,
              "-d", "-t", session],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

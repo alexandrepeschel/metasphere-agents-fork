@@ -26,8 +26,7 @@ Commands:
   ensure                 Start the orchestrator session if it is not
                          already alive.
   status                 Print orchestrator session liveness + idle.
-  restart                Restart the agent REPL inside the orchestrator
-                         session (preserves the tmux pane).
+  restart                Recreate the orchestrator tmux session and REPL.
 """
 
 
@@ -81,12 +80,16 @@ def cmd_restart(args: argparse.Namespace) -> int:
     paths = resolve()
     alive, _ = session_health(paths)
     if not alive:
-        start_session(paths)
-        print(f"session={SESSION_NAME} started")
+        if start_session(paths):
+            print(f"session={SESSION_NAME} started")
+            return 0
+        print(f"session={SESSION_NAME} start failed", file=sys.stderr)
+        return 1
+    if restart_session("CLI restart", paths):
+        print(f"session={SESSION_NAME} recreated")
         return 0
-    restart_session("CLI restart", paths)
-    print(f"session={SESSION_NAME} agent REPL restarted")
-    return 0
+    print(f"session={SESSION_NAME} restart failed", file=sys.stderr)
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
