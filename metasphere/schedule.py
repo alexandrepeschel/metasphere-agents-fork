@@ -21,6 +21,7 @@ import dataclasses
 import datetime as _dt
 import json
 import logging
+import re
 import subprocess
 import time
 from contextlib import contextmanager
@@ -219,8 +220,17 @@ def resolve_target_agent(job: Job) -> str:
     prefix-match branches that overrode ``agent_id`` for specific
     job-name prefixes; those are removed and live jobs.json files
     were migrated to carry the resolved ``agent_id`` directly.
+
+    ``agent_id`` is stored both ways in the wild — the migration wrote
+    ``"@orchestrator"`` while this function assumed a bare
+    ``"orchestrator"`` — so the ``@`` is added only when missing.
+    Unconditional concatenation produced ``"@@orchestrator"``, which
+    matches no agent dir: every cron job then failed the MISSION.md
+    lookup and fell through to inbox-only ``!task`` delivery, silently
+    discarding both ``model`` and ``session_target``.
     """
-    return "@" + (job.agent_id or "main")
+    raw = (job.agent_id or "main").strip()
+    return raw if raw.startswith("@") else "@" + raw
 
 
 # ---------- dispatch ----------
@@ -249,12 +259,26 @@ def _find_mission(target_agent: str, paths: Paths) -> Path | None:
     return None
 
 
+def _isolated_agent_name(job_name: str) -> str:
+    """Derive an ephemeral agent name from a job name.
+
+    Dated so two fires of the same job never collide on one agent dir,
+    and slug-safe because ``_validate_agent_name`` only rejects path
+    separators — a raw ``writers-room:daily-checkin`` would be accepted
+    and then sit awkwardly on disk.
+    """
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", job_name or "cron").strip("-").lower()
+    return f"@{slug or 'cron'}-{_dt.datetime.now(_dt.timezone.utc):%m%d-%H%M}"
+
+
 def _wake_target(
     target_agent: str,
     first_task: str | None,
     paths: Paths,
     *,
     model: str = "",
+    session_target: str = "persistent",
+    job_name: str = "",
 ) -> bool:
     """Wake ``target_agent`` via :func:`metasphere.agents.wake_persistent`.
 
@@ -264,15 +288,49 @@ def _wake_target(
     pane; False on exception or on silent pane-submit failure. Callers
     fall back to inbox-only delivery so the at-most-once stamp doesn't
     swallow the task (issue #106).
+
+    A job that asked for ``session_target="isolated"`` AND named a
+    ``model`` is spawned as an ephemeral agent instead of being injected
+    into the persistent orchestrator pane. That pane runs whatever model
+    it was started with, so injecting there silently discards ``model``
+    — which is how eleven jobs configured for Haiku and Sonnet came to
+    run on the orchestrator's Opus. Falls back to the injection path on
+    any spawn failure, so a broken spawn degrades to the old behaviour
+    rather than dropping the task.
     """
     try:
         if target_agent == "@orchestrator":
             from .gateway.session import SESSION_NAME, start_session
 
+            if session_target == "isolated" and model and first_task:
+                try:
+                    _agents.spawn_ephemeral(
+                        _isolated_agent_name(job_name),
+                        str(paths.project_root),
+                        first_task,
+                        parent="@scheduler",
+                        paths=paths,
+                        model=model,
+                    )
+                    return True
+                except Exception as e:
+                    logger.warning(
+                        "isolated spawn failed for %s (model=%s); falling "
+                        "back to orchestrator injection: %s",
+                        job_name or target_agent, model, e,
+                    )
+
             if not start_session(paths):
                 return False
             if first_task is None:
                 return True
+            if model:
+                logger.warning(
+                    "job %s configured model=%s but is being injected into "
+                    "the persistent orchestrator pane, which runs its own "
+                    "model — the setting has no effect",
+                    job_name or target_agent, model,
+                )
             banner = _agents._prepare_wake_banner(
                 target_agent, first_task, paths
             )
@@ -410,6 +468,7 @@ def dispatch_to_agent(
     paths: Paths | None = None,
     job_name: str = "",
     model: str = "",
+    session_target: str = "persistent",
 ) -> bool:
     """Wake the target agent or fall back to a ``!task`` message.
 
@@ -428,7 +487,10 @@ def dispatch_to_agent(
         target_agent == "@orchestrator"
         or _find_mission(target_agent, paths) is not None
     ):
-        if _wake_target(target_agent, first_task=payload, paths=paths, model=model):
+        if _wake_target(
+            target_agent, first_task=payload, paths=paths, model=model,
+            session_target=session_target, job_name=job_name,
+        ):
             return True
         # Fall through to inbox-only delivery if wake itself failed.
 
@@ -499,6 +561,7 @@ def run_due_jobs(paths: Paths | None = None, *, now: int | None = None) -> list[
                 paths=paths,
                 job_name=job.name,
                 model=job.model or "",
+                session_target=job.session_target or "persistent",
             )
         results.append(
             FireResult(
@@ -651,6 +714,7 @@ def fire_job(job_ref: str, paths: Paths | None = None) -> FireResult | None:
             paths=paths,
             job_name=job.name,
             model=job.model,
+            session_target=job.session_target or "persistent",
         )
     return FireResult(
         job_id=job.id,
