@@ -687,11 +687,12 @@ def test_voice_capsule_loads_all_three_in_order(tmp_paths: Paths):
     (d / "USER.md").write_text("# user\n\nUSER-LINE.\n", encoding="utf-8")
     out = ctx._render_voice_capsule(tmp_paths, "@orchestrator")
 
-    # All three sections present, in declared order: Voice → Identity → User-model
+    # Stable USER/IDENTITY facts lead verbose voice so hook-output previews
+    # preserve them even if future context growth crosses a transport limit.
     voice_idx = out.index("## Voice")
     identity_idx = out.index("## Identity")
     user_idx = out.index("## User-model")
-    assert voice_idx < identity_idx < user_idx
+    assert user_idx < identity_idx < voice_idx
 
     # All three bodies landed unchanged
     assert "VOICE-LINE." in out
@@ -832,3 +833,34 @@ def test_voice_capsule_prefers_project_over_global(tmp_paths: Paths):
     out = ctx._render_voice_capsule(tmp_paths, "@dual")
     assert "PROJECT-VOICE." in out
     assert "GLOBAL-VOICE." not in out
+
+
+def test_voice_capsule_sparse_project_duplicate_falls_back_per_file(tmp_paths: Paths):
+    """A scoped SOUL override must not shadow global IDENTITY/USER files."""
+    proj_d = _seed_project_agent_dir(tmp_paths, "acme", "@dual")
+    (proj_d / "SOUL.md").write_text("# soul\n\nPROJECT-VOICE.\n", encoding="utf-8")
+    glob_d = _seed_agent_dir(tmp_paths, "@dual")
+    (glob_d / "IDENTITY.md").write_text("# identity\n\nGLOBAL-IDENTITY.\n", encoding="utf-8")
+    (glob_d / "USER.md").write_text(
+        "# user\n\nCurrent Project: Recurse\n", encoding="utf-8"
+    )
+
+    out = ctx._render_voice_capsule(tmp_paths, "@dual")
+    assert "PROJECT-VOICE." in out
+    assert "GLOBAL-IDENTITY." in out
+    assert "Current Project: Recurse" in out
+
+
+def test_build_context_budgets_persona_files_independently(tmp_paths: Paths, monkeypatch):
+    """A large SOUL cannot truncate away deterministic USER facts."""
+    monkeypatch.setenv("METASPHERE_AGENT_ID", "@orchestrator")
+    d = _seed_agent_dir(tmp_paths, "@orchestrator")
+    (d / "SOUL.md").write_text("# soul\n\n" + ("voice detail\n" * 500), encoding="utf-8")
+    (d / "IDENTITY.md").write_text("# identity\n\nSpot identity.\n", encoding="utf-8")
+    (d / "USER.md").write_text("# user\n\nCurrent Project: Recurse\n", encoding="utf-8")
+    monkeypatch.setattr(ctx, "_render_memory_fts", lambda *a, **k: "")
+
+    out = ctx.build_context(tmp_paths, budget=256, prompt="Tell me about Recurse")
+    assert "_(truncated:" in out
+    assert "Spot identity." in out
+    assert "Current Project: Recurse" in out

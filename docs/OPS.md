@@ -266,6 +266,22 @@ capsule, or the host-health ALERT. Sending such a reply to Telegram
 makes the agent look amnesic; suppressing it costs one turn but keeps
 trust in the channel.
 
+Claude reads this hook from the runtime/project
+`.claude/settings.local.json` files and receives the existing plain-text
+output. Codex reads one user-level definition from `~/.codex/hooks.json` and
+receives structured `hookSpecificOutput.additionalContext`; its event's
+`prompt` field is passed directly into recall. USER and IDENTITY baseline
+sections render before verbose SOUL and have independent byte budgets. The
+Codex handler's 12,000-token transport limit is intentionally above the
+builder's bounded section output so stable profile facts remain inline.
+
+Codex user hooks are non-managed hooks. Do not add
+`--dangerously-bypass-hook-trust` to project-agent launch paths: review and
+trust the generated absolute command via `/hooks`. This avoids implicitly
+trusting arbitrary project-local hooks. Updates remove only Metasphere-owned
+legacy matcher groups from runtime/source `.codex/hooks.json` files and retain
+operator-defined groups.
+
 ### Files
 
 - `metasphere/breadcrumbs.py` — breadcrumb read/write/evaluate helpers

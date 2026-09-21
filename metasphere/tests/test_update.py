@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -984,6 +985,41 @@ def test_sync_hook_paths_rewrites_repo_and_metasphere_dir(tmp_paths, tmp_path):
         after = _json.loads(sp.read_text())
         assert after["hooks"]["Stop"][0]["hooks"][0]["command"] == \
             f"{bin_path} hooks posthook"
+
+
+def test_sync_codex_hooks_installs_user_scope_and_cleans_legacy_layers(tmp_paths, tmp_path):
+    """Migration preserves custom hooks while removing duplicate old copies."""
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = tmp_paths.root / ".codex" / "hooks.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"hooks": {
+        "UserPromptSubmit": [
+            {"matcher": "", "hooks": [
+                {"type": "command", "command": "/old/metasphere hooks context"},
+                {"type": "command", "command": "/custom/same-group"},
+            ]},
+            {"hooks": [{"type": "command", "command": "/custom/prompt-hook"}]},
+        ],
+        "Stop": [{"hooks": [{"type": "command", "command": "/old/metasphere hooks posthook"}]}],
+    }}))
+
+    assert _update._sync_codex_hooks(tmp_paths, home) == 2
+    user = json.loads((home / ".codex" / "hooks.json").read_text())
+    prompt_handler = user["hooks"]["UserPromptSubmit"][-1]["hooks"][0]
+    assert prompt_handler["command"].endswith("metasphere hooks context")
+    assert prompt_handler["additionalContextLimit"] == _update.CODEX_CONTEXT_LIMIT
+    migrated = json.loads(legacy.read_text())
+    assert migrated["hooks"]["UserPromptSubmit"] == [
+        {"matcher": "", "hooks": [
+            {"type": "command", "command": "/custom/same-group"}
+        ]},
+        {"hooks": [{"type": "command", "command": "/custom/prompt-hook"}]}
+    ]
+    assert "Stop" not in migrated["hooks"]
+
+    # Re-running replaces our group in place without duplicating it.
+    assert _update._sync_codex_hooks(tmp_paths, home) == 0
 
 
 def test_run_update_restart_after_pip_reinstall(tmp_paths, monkeypatch):

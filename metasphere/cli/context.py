@@ -113,7 +113,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         block = build_context(prompt=prompt)
-        sys.stdout.write(block)
+        # Codex supports plain stdout for UserPromptSubmit, but the structured
+        # form makes the event and trust boundary explicit and safely JSON-
+        # escapes arbitrary memory/persona text. ``turn_id`` is a Codex-only
+        # field, so it is a reliable discriminator that preserves Claude's
+        # existing plain-text hook behavior byte-for-byte.
+        if payload.get("turn_id") is not None:
+            sys.stdout.write(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": block,
+                }
+            }))
+        else:
+            sys.stdout.write(block)
     except Exception as exc:  # noqa: BLE001 — context build must not crash the host
         # Write the FAILED breadcrumb so the posthook fail-closes this
         # turn. We deliberately do NOT re-raise: the UserPromptSubmit

@@ -133,6 +133,22 @@ def test_install_sh_renders_three_split_daemons():
     assert "@@METASPHERE_VENV_BIN@@" in src
 
 
+def test_install_sh_codex_hook_migration_is_user_scoped_and_handler_granular():
+    """Installer must not delete custom siblings from a mixed hook group."""
+    src = INSTALL_SH.read_text()
+    start = src.index("seed_codex_hooks()")
+    end = src.index("seed_runtime_integration()", start)
+    block = src[start:end]
+    assert 'local target="$HOME/.codex"' in block
+    assert "UserPromptSubmit" in block
+    assert "additionalContextLimit: 12000" in block
+    # Filter handlers inside each group, then discard only empty groups. The
+    # former whole-group `select(any(...))` form erased custom sibling hooks.
+    assert ".hooks = [.hooks[]?" in block
+    assert "select((.hooks | length) > 0)" in block
+    assert "select(any(.hooks[]?" not in block
+
+
 def test_install_sh_phases_out_obsolete_omnibus():
     src = INSTALL_SH.read_text()
     # The omnibus metasphere.service shipped a non-existent CLI verb

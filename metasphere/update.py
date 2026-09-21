@@ -22,6 +22,7 @@ import datetime as _dt
 import json
 import logging
 import os
+import shlex
 import platform
 import shutil
 import subprocess
@@ -466,6 +467,7 @@ def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
 
 
 _VENV_METASPHERE_BIN = "venv/bin/metasphere"
+CODEX_CONTEXT_LIMIT = 12_000
 
 
 def _venv_metasphere_bin(paths: Paths) -> Path:
@@ -619,6 +621,135 @@ def _rewrite_settings_hooks(settings_path: Path,
     return True
 
 
+def _without_metasphere_codex_handlers(
+    groups: object, managed_command: str
+) -> list[object]:
+    """Remove only our handlers, retaining custom handlers in their group."""
+    if not isinstance(groups, list):
+        return []
+    out: list[object] = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            out.append(group)
+            continue
+        retained = [
+            handler for handler in group["hooks"]
+            if not (
+                isinstance(handler, dict)
+                and isinstance(handler.get("command"), str)
+                and handler["command"] == managed_command
+            )
+        ]
+        if retained:
+            updated = dict(group)
+            updated["hooks"] = retained
+            out.append(updated)
+    return out
+
+
+def _sync_codex_hooks(paths: Paths, home_dir: Path,
+                      repo: Path | None = None) -> int:
+    """Install the Metasphere Codex hooks once at user scope.
+
+    Codex composes hooks from all active layers, so legacy project/runtime
+    copies would inject the same context more than once. This migration
+    removes only matcher groups containing commands previously installed by
+    Metasphere, preserves unrelated hooks and metadata, and writes the current
+    context/Stop groups to ``~/.codex/hooks.json``.
+    """
+    bin_path = str(_venv_metasphere_bin(paths))
+    context_command = shlex.join([bin_path, "hooks", "context"])
+    posthook_command = shlex.join([bin_path, "hooks", "posthook"])
+    managed = {
+        "UserPromptSubmit": {
+            "hooks": [{
+                "type": "command",
+                "command": context_command,
+                "statusMessage": "Loading Metasphere context",
+                "additionalContextLimit": CODEX_CONTEXT_LIMIT,
+            }]
+        },
+        "Stop": {
+            "hooks": [{
+                "type": "command",
+                "command": posthook_command,
+                "statusMessage": "Forwarding response to Telegram",
+            }]
+        },
+    }
+    user_file = home_dir / ".codex" / "hooks.json"
+    candidates = [user_file, paths.root / ".codex" / "hooks.json"]
+    if repo is not None:
+        candidates.append(repo / ".codex" / "hooks.json")
+
+    changed = 0
+    user_hook_ready = False
+    seen: set[str] = set()
+    for hook_file in candidates:
+        key = str(hook_file)
+        if key in seen:
+            continue
+        seen.add(key)
+        if hook_file.is_file():
+            try:
+                doc = json.loads(hook_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("%s unparseable, skipping Codex hook sync: %s", hook_file, exc)
+                if hook_file == user_file:
+                    return 0
+                continue
+            if not isinstance(doc, dict):
+                if hook_file == user_file:
+                    return 0
+                continue
+        elif hook_file == user_file:
+            doc = {}
+        else:
+            continue
+
+        hooks = doc.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        else:
+            hooks = dict(hooks)
+        for event, managed_command in (
+            ("UserPromptSubmit", context_command),
+            ("Stop", posthook_command),
+        ):
+            retained = _without_metasphere_codex_handlers(
+                hooks.get(event), managed_command
+            )
+            if hook_file == user_file:
+                retained.append(managed[event])
+            if retained:
+                hooks[event] = retained
+            else:
+                hooks.pop(event, None)
+        doc["hooks"] = hooks
+
+        rendered = json.dumps(doc, indent=2) + "\n"
+        try:
+            old = hook_file.read_text(encoding="utf-8") if hook_file.is_file() else None
+            if old == rendered:
+                if hook_file == user_file:
+                    user_hook_ready = True
+                continue
+            hook_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = hook_file.with_suffix(".json.tmp")
+            tmp.write_text(rendered, encoding="utf-8")
+            tmp.replace(hook_file)
+            changed += 1
+            if hook_file == user_file:
+                user_hook_ready = True
+        except OSError as exc:
+            logger.warning("%s Codex hook sync failed: %s", hook_file, exc)
+            if hook_file == user_file:
+                return 0
+        if hook_file == user_file and not user_hook_ready:
+            return 0
+    return changed
+
+
 def _sync_claude_integration(repo: Path, home_dir: Path,
                               paths: Paths | None = None) -> None:
     """Refresh ``~/.claude/{skills,commands}`` symlinks from the repo
@@ -721,6 +852,17 @@ def _sync_claude_integration(repo: Path, home_dir: Path,
             )
     except Exception as e:
         logger.warning("hook-paths sync failed: %s", e)
+
+    # Do not introduce a Codex user hook on Claude-only installations. The
+    # installer handles fresh Codex systems; scheduled Codex updates carry
+    # this same runtime marker and migrate legacy project-local copies.
+    if os.environ.get("METASPHERE_AGENT_RUNTIME", "").strip().lower() == "codex":
+        try:
+            rewrote_count = _sync_codex_hooks(paths, home_dir, repo=repo)
+            if rewrote_count:
+                logger.info("Codex user hook paths synchronized across %d file(s)", rewrote_count)
+        except Exception as e:
+            logger.warning("Codex hook-path sync failed: %s", e)
 
 
 def _restart_daemons() -> None:

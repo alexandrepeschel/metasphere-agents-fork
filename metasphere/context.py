@@ -116,9 +116,8 @@ _STATUS_ICON = {
 
 
 def _render_status_header(paths: Paths, agent: str) -> str:
-    agent_dir = paths.find_agent_dir(agent) or paths.agent_dir(agent)
     status = "unknown"
-    sf = agent_dir / "status"
+    sf = _agent_file(paths, agent, "status")
     if sf.is_file():
         try:
             status = sf.read_text(encoding="utf-8").strip() or "unknown"
@@ -144,6 +143,60 @@ def _read_persona_body(path: Path) -> str:
     return "\n".join(lines).strip()
 
 
+def _agent_file(paths: Paths, agent: str, *names: str) -> Path:
+    """Resolve one agent file with migration-safe per-file precedence.
+
+    Project-scoped identity is authoritative when it contains the requested
+    file.  A sparse duplicate no longer hides a richer global identity: each
+    missing file falls back independently to the global agent directory and
+    then to any remaining project-scoped candidates.
+    """
+    primary = paths.find_agent_dir(agent)
+    candidates = [primary] if primary is not None else []
+    global_dir = paths.agent_dir(agent)
+    if global_dir not in candidates:
+        candidates.append(global_dir)
+    if paths.projects.is_dir():
+        for project in sorted(paths.projects.iterdir()):
+            candidate = project / "agents" / agent
+            if candidate.is_dir() and candidate not in candidates:
+                candidates.append(candidate)
+    for directory in candidates:
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    # Preserve a deterministic write/debug pointer when no file exists.
+    return (primary or global_dir) / names[0]
+
+
+def _persona_sections(paths: Paths, agent: str) -> list[str]:
+    """Render SOUL, IDENTITY, and USER as independently budgetable blocks."""
+    soul_path = _agent_file(paths, agent, "SOUL.md", "VOICE.md")
+    identity_path = _agent_file(paths, agent, "IDENTITY.md")
+    user_path = _agent_file(paths, agent, "USER.md")
+    soul_body = _read_persona_body(soul_path)
+    identity_body = _read_persona_body(identity_path)
+    user_body = _read_persona_body(user_path)
+
+    sections: list[str] = []
+    # Stable facts lead the hook output so Codex's head-and-tail preview still
+    # carries them if a future context expansion ever crosses its spill limit.
+    if user_body:
+        sections.append("## User-model (who you collaborate with)\n\n" + user_body)
+    if identity_body:
+        sections.append("## Identity\n\n" + identity_body)
+    if soul_body:
+        sections.append("## Voice (who you are, how you sound)\n\n" + soul_body)
+    if sections:
+        roots = sorted({str(p.parent) for p in (soul_path, identity_path, user_path) if p.is_file()})
+        sections.append(
+            "_(Persona files at `" + "`, `".join(roots)
+            + "` + persona-index.md for lazy-loadables.)_"
+        )
+    return sections
+
+
 def _render_voice_capsule(paths: Paths, agent: str) -> str:
     """Inject the agent's full persona — SOUL / IDENTITY / USER — into
     every turn's context.
@@ -160,28 +213,9 @@ def _render_voice_capsule(paths: Paths, agent: str) -> str:
     the file under the old name). The trailing pointer line is only
     emitted when at least one persona file landed.
     """
-    agent_dir = paths.find_agent_dir(agent) or paths.agent_dir(agent)
-    soul_body = (
-        _read_persona_body(agent_dir / "SOUL.md")
-        or _read_persona_body(agent_dir / "VOICE.md")
-    )
-    identity_body = _read_persona_body(agent_dir / "IDENTITY.md")
-    user_body = _read_persona_body(agent_dir / "USER.md")
-
-    sections: list[str] = []
-    if soul_body:
-        sections.append("## Voice (who you are, how you sound)\n\n" + soul_body)
-    if identity_body:
-        sections.append("## Identity\n\n" + identity_body)
-    if user_body:
-        sections.append("## User-model (who you collaborate with)\n\n" + user_body)
-
+    sections = _persona_sections(paths, agent)
     if not sections:
         return ""
-    sections.append(
-        f"_(Persona files at `{agent_dir}` + persona-index.md "
-        f"for lazy-loadables.)_"
-    )
     return "\n\n".join(sections) + "\n"
 
 
@@ -213,8 +247,7 @@ _PROJECT_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 def _render_mission_capsule(paths: Paths, agent: str) -> str:
     """Inject the agent's MISSION.md so persistent agents know their
     purpose every turn. Capped to ~1KB / 30 lines."""
-    agent_dir = paths.find_agent_dir(agent) or paths.agent_dir(agent)
-    mission_file = agent_dir / "MISSION.md"
+    mission_file = _agent_file(paths, agent, "MISSION.md")
     if not mission_file.is_file():
         return ""
     try:
@@ -1006,8 +1039,7 @@ def _render_memory_fts(
     # is scored primarily against what the user just asked; the stem and
     # fresh signal keep the query non-empty and turn-varying when there
     # is no prompt (heartbeat/manual turns).
-    agent_dir = paths.find_agent_dir(agent) or paths.agent_dir(agent)
-    task_file = agent_dir / "task"
+    task_file = _agent_file(paths, agent, "task")
     query_parts: list[str] = []
     if prompt and prompt.strip():
         query_parts.append(prompt.strip())
@@ -1039,8 +1071,16 @@ def _render_memory_fts(
     # highest signal, pure Python, fast), then CAM (historical Claude
     # session transcripts), then token-overlap as final fallback.
     strategies = [HybridStrategy([
-        AutoMemoryStrategy(),
-        CamStrategy(fast=True, timeout=2.0),
+        AutoMemoryStrategy(root=_auto_memory_dir_for_path(str(paths.project_root))),
+        # CAM scores are batch-normalized, so the top result is always 1.0.
+        # Require an independent content-token anchor and cap the automatic
+        # bridge to two hits; explicit memory-search CLI calls remain ungated.
+        CamStrategy(
+            fast=True,
+            timeout=2.0,
+            min_lexical_overlap=1,
+            max_eligible_hits=2,
+        ),
         TokenOverlapStrategy(paths),
     ])]
     body = _memory_context_for(
@@ -1342,8 +1382,11 @@ def build_context(
     sections.append(truncate_section(alert, budget) if alert else "")
 
     sections.append(truncate_section(_render_status_header(paths, agent), budget))
-    voice = _render_voice_capsule(paths, agent)
-    sections.append(truncate_section(voice, budget) if voice else "")
+    # Persona files are stable baseline context and receive independent byte
+    # budgets. A long SOUL can no longer consume the shared capsule budget and
+    # silently erase IDENTITY or USER facts later in the combined string.
+    persona = _persona_sections(paths, agent)
+    sections.extend(truncate_section(part, budget) for part in persona if part)
     mission = _render_mission_capsule(paths, agent)
     sections.append(truncate_section(mission, budget) if mission else "")
     project_capsule = _render_project_capsule(paths, agent)

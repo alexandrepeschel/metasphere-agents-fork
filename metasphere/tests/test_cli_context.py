@@ -16,8 +16,12 @@ import json
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from metasphere import breadcrumbs as _bc
 from metasphere.cli import context as cli_context
+from metasphere import context as context_builder
+from metasphere import update as _update
 from metasphere.paths import Paths
 
 
@@ -69,6 +73,9 @@ def test_cli_context_writes_success_breadcrumb(tmp_paths: Paths, monkeypatch, ca
     # build_context emitted to stdout — at minimum the status header.
     out = capsys.readouterr().out
     assert "@orchestrator" in out
+    # Claude payloads have no Codex-only turn_id and retain plain stdout.
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)
 
 
 def test_cli_context_writes_failed_breadcrumb_on_exception(tmp_paths: Paths, monkeypatch):
@@ -110,6 +117,64 @@ def test_cli_context_threads_prompt_into_build_context(tmp_paths: Paths, monkeyp
         rc = cli_context.main([])
     assert rc == 0
     assert bc_mock.call_args.kwargs.get("prompt") == "a user prompt"
+
+
+def test_cli_context_codex_contract_uses_structured_additional_context(
+    tmp_paths: Paths, monkeypatch, capsys
+):
+    """Codex turn_id selects the official UserPromptSubmit JSON contract."""
+    monkeypatch.setenv("METASPHERE_AGENT_ID", "@project-agent")
+    monkeypatch.setenv("METASPHERE_GATEWAY_SESSION", "1")
+    transcript = tmp_paths.root / "codex.jsonl"
+    _write_jsonl(transcript, [{"type": "user"}])
+    event = json.loads(_payload(transcript, "codex-turn"))
+    event["turn_id"] = "turn-123"
+    event["prompt"] = "What did we decide about Recurse?"
+    monkeypatch.setattr("sys.stdin", _FakeStdin(json.dumps(event).encode()))
+
+    with mock.patch(
+        "metasphere.cli.context.build_context", return_value="## Current Project: Recurse\n"
+    ) as build:
+        assert cli_context.main([]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "Current Project: Recurse" in output["hookSpecificOutput"]["additionalContext"]
+    assert build.call_args.kwargs["prompt"] == "What did we decide about Recurse?"
+
+
+def test_codex_installed_limit_keeps_recurse_inline(
+    tmp_paths: Paths, tmp_path: Path, monkeypatch, capsys
+):
+    """Exercise real context output against the installed Codex transport cap."""
+    home = tmp_path / "operator-home"
+    home.mkdir()
+    assert _update._sync_codex_hooks(tmp_paths, home) == 1
+    config = json.loads((home / ".codex" / "hooks.json").read_text())
+    handler = config["hooks"]["UserPromptSubmit"][-1]["hooks"][0]
+    limit = handler["additionalContextLimit"]
+
+    monkeypatch.setenv("METASPHERE_AGENT_ID", "@orchestrator")
+    monkeypatch.setenv("METASPHERE_GATEWAY_SESSION", "1")
+    agent = tmp_paths.agent_dir("@orchestrator")
+    agent.mkdir(parents=True)
+    (agent / "SOUL.md").write_text("# soul\n\n" + ("voice detail\n" * 500), encoding="utf-8")
+    (agent / "IDENTITY.md").write_text("# identity\n\nSpot identity.\n", encoding="utf-8")
+    (agent / "USER.md").write_text("# user\n\nCurrent Project: Recurse\n", encoding="utf-8")
+    transcript = tmp_paths.root / "orchestrator-codex.jsonl"
+    _write_jsonl(transcript, [{"type": "user"}])
+    event = json.loads(_payload(transcript, "orchestrator-codex"))
+    event.update({"turn_id": "turn-orchestrator", "prompt": "What is the current project?"})
+    monkeypatch.setattr("sys.stdin", _FakeStdin(json.dumps(event).encode()))
+    monkeypatch.setattr(context_builder, "_render_memory_fts", lambda *a, **k: "")
+
+    assert cli_context.main([]) == 0
+    output = json.loads(capsys.readouterr().out)
+    additional = output["hookSpecificOutput"]["additionalContext"]
+    assert "Current Project: Recurse" in additional
+    # Codex documents this setting as an approximate token limit. A strict
+    # 4-byte-per-token bound proves this representative output remains inline.
+    assert len(additional.encode("utf-8")) < limit * 4
 
 
 def test_cli_context_interactive_session_skips_everything(tmp_paths: Paths, monkeypatch, capsys):

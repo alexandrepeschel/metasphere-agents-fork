@@ -1226,8 +1226,11 @@ seed_claude_permissions() {
     # the venv (or the package shim) propagates through the existing
     # settings.local.json without operator intervention. Keep this
     # form aligned with the venv-bin form there.
-    local context_path="$METASPHERE_DIR/venv/bin/metasphere hooks context"
-    local posthook_path="$METASPHERE_DIR/venv/bin/metasphere hooks posthook"
+    local hook_bin hook_bin_quoted context_path posthook_path
+    hook_bin="$METASPHERE_DIR/venv/bin/metasphere"
+    printf -v hook_bin_quoted '%q' "$hook_bin"
+    context_path="$hook_bin_quoted hooks context"
+    posthook_path="$hook_bin_quoted hooks posthook"
     local pretool_path="$METASPHERE_DIR/venv/bin/metasphere hooks pretool"
     local hooks
     hooks=$(jq -n \
@@ -1302,15 +1305,30 @@ seed_claude_permissions() {
 seed_codex_hooks() {
     info "Seeding Codex hooks..."
 
+    local context_path="$METASPHERE_DIR/venv/bin/metasphere hooks context"
     local posthook_path="$METASPHERE_DIR/venv/bin/metasphere hooks posthook"
-    local target
-    for target in "$SCRIPT_DIR/.codex" "$METASPHERE_DIR/.codex"; do
-        local target_file="$target/hooks.json"
-        mkdir -p "$target"
+    # Codex loads every matching hook source, rather than applying normal
+    # config-layer replacement. Install once at user scope so direct,
+    # persistent, and headless sessions (including project agents) share the
+    # same hook without duplicate context. User hooks also remain available in
+    # untrusted project directories; Codex still applies its normal /hooks
+    # review gate to this non-managed definition.
+    local target="$HOME/.codex"
+    local target_file="$target/hooks.json"
+    mkdir -p "$target"
 
-        if [[ ! -f "$target_file" ]]; then
-            jq -n --arg post "$posthook_path" '{
+    local target_ready=false
+    if [[ ! -f "$target_file" ]]; then
+        jq -n --arg ctx "$context_path" --arg post "$posthook_path" '{
                 hooks: {
+                    UserPromptSubmit: [{
+                        hooks: [{
+                            type: "command",
+                            command: $ctx,
+                            statusMessage: "Loading Metasphere context",
+                            additionalContextLimit: 12000
+                        }]
+                    }],
                     Stop: [{
                         hooks: [{
                             type: "command",
@@ -1320,28 +1338,70 @@ seed_codex_hooks() {
                     }]
                 }
             }' > "$target_file" \
-                && ok "Created $target_file (Stop hook)" \
-                || warn "Failed to create $target_file"
-            continue
-        fi
-
+            && { target_ready=true; ok "Created $target_file (Codex context + Stop hooks)"; } \
+            || warn "Failed to create $target_file"
+    else
         local tmp
         tmp=$(mktemp)
-        if jq --arg post "$posthook_path" '
+        if jq --arg ctx "$context_path" --arg post "$posthook_path" '
             .hooks = (.hooks // {}) |
-            .hooks.Stop = [{
-                hooks: [{
-                    type: "command",
-                    command: $post,
-                    statusMessage: "Forwarding response to Telegram"
-                }]
-            }]
-        ' "$target_file" > "$tmp" 2>/dev/null; then
-            mv "$tmp" "$target_file" && ok "Updated $target_file (Stop hook)" \
+            .hooks.UserPromptSubmit = (
+                [(.hooks.UserPromptSubmit // [])[] |
+                  .hooks = [.hooks[]? |
+                    select((.command // "") != $ctx)] |
+                  select((.hooks | length) > 0)]
+                + [{hooks: [{type: "command", command: $ctx,
+                    statusMessage: "Loading Metasphere context",
+                    additionalContextLimit: 12000}]}]
+            ) |
+            .hooks.Stop = (
+                [(.hooks.Stop // [])[] |
+                  .hooks = [.hooks[]? |
+                    select((.command // "") != $post)] |
+                  select((.hooks | length) > 0)]
+                + [{hooks: [{type: "command", command: $post,
+                    statusMessage: "Forwarding response to Telegram"}]}]
+            )
+            ' "$target_file" > "$tmp" 2>/dev/null; then
+            mv "$tmp" "$target_file" && { target_ready=true; ok "Updated $target_file (Codex context + Stop hooks)"; } \
                 || { warn "Failed to update $target_file"; rm -f "$tmp"; }
         else
             rm -f "$tmp"
             warn "Could not parse $target_file - leaving unchanged"
+        fi
+    fi
+
+    # Migration for pre-parity installs: Codex composes all active layers, so
+    # leave custom groups intact but remove our now-duplicated groups from the
+    # old source/runtime locations.
+    if [[ "$target_ready" != true ]]; then
+        warn "Codex user hook was not installed; preserving legacy hook sources"
+        return
+    fi
+
+    local legacy_file legacy_tmp
+    for legacy_file in "$SCRIPT_DIR/.codex/hooks.json" "$METASPHERE_DIR/.codex/hooks.json"; do
+        [[ "$legacy_file" == "$target_file" || ! -f "$legacy_file" ]] && continue
+        legacy_tmp=$(mktemp)
+        if jq --arg ctx "$context_path" --arg post "$posthook_path" '
+            .hooks = (.hooks // {}) |
+            .hooks.UserPromptSubmit = [(.hooks.UserPromptSubmit // [])[] |
+              .hooks = [.hooks[]? |
+                select((.command // "") != $ctx)] |
+              select((.hooks | length) > 0)] |
+            .hooks.Stop = [(.hooks.Stop // [])[] |
+              .hooks = [.hooks[]? |
+                select((.command // "") != $post)] |
+              select((.hooks | length) > 0)] |
+            if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end |
+            if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end
+        ' "$legacy_file" > "$legacy_tmp" 2>/dev/null; then
+            mv "$legacy_tmp" "$legacy_file" \
+                && ok "Migrated Metasphere hooks out of $legacy_file" \
+                || { warn "Failed to migrate $legacy_file"; rm -f "$legacy_tmp"; }
+        else
+            rm -f "$legacy_tmp"
+            warn "Could not parse $legacy_file - leaving unchanged"
         fi
     done
 }

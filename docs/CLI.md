@@ -225,6 +225,8 @@ Options:
 For rich content — parens, bullets (•), backticks, $, quotes, newlines —
 pass the body via stdin (positional "-") or --body-file to avoid ALL shell
 escaping, e.g. `metasphere message send - --to alice < body.txt`.
+In positional text, literal \n and \r\n sequences become line breaks;
+double the backslash to send a literal \n sequence.
 
 Resolution order for `--surface auto`:
   1. ~/.metasphere/agents/@<METASPHERE_AGENT_ID>/active_conversation
@@ -263,6 +265,8 @@ Commands:
 
 Rich content (parens, bullets, backticks, $, quotes, newlines): pass the
 body via stdin ("-") or --body-file to skip ALL shell quoting.
+In positional text, literal \n and \r\n sequences become line breaks;
+double the backslash to send a literal \n sequence.
 
 Polling lives in the metasphere-gateway systemd service; there is no
 CLI poller.

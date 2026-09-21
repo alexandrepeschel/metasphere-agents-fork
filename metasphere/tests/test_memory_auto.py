@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from metasphere.memory.auto import AutoMemoryStrategy, _default_memory_root
@@ -164,47 +165,35 @@ def test_scoring_length_damps_huge_vocab_files(tmp_path):
     assert hits[0].source == "auto-memory:focused.md"
 
 
-def test_default_memory_root_uses_pwd_single_dash_slug(tmp_path, monkeypatch):
-    # Claude Code names the project dir for cwd /a/b as '-a-b' (the leading
-    # '/' is the ONLY leading dash). _default_memory_root must reproduce that
-    # exact slug. A decoy dir that sorts first AND carries MEMORY.md would win
-    # the iterdir fallback — which is reached only when the PWD slug is wrong
-    # (the old '-' + pwd.replace bug produced a double leading dash). The
-    # correct dir carries NO MEMORY.md, so the fallback could never pick it:
-    # equality here proves the PWD branch matched.
+def test_default_memory_root_uses_explicit_root_not_pwd(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PWD", "/home/op/projects/myproj")
-    projects = tmp_path / ".claude" / "projects"
-    correct = projects / "-home-op-projects-myproj" / "memory"
-    correct.mkdir(parents=True)
-    decoy = projects / "-aaa-other" / "memory"
-    decoy.mkdir(parents=True)
-    (decoy / "MEMORY.md").write_text("- [x](x.md)\n", encoding="utf-8")
-    assert _default_memory_root() == correct
+    monkeypatch.setenv("PWD", "/daemon/wrong")
+    monkeypatch.delenv("METASPHERE_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("METASPHERE_REPO_ROOT", raising=False)
+    expected = tmp_path / ".claude" / "projects" / "-home-op-projects-myproj" / "memory"
+    assert _default_memory_root("/home/op/projects/myproj") == expected
 
 
-def test_default_memory_root_maps_dotted_segments(tmp_path, monkeypatch):
+def test_default_memory_root_env_maps_dotted_segments(tmp_path, monkeypatch):
     # A dotted cwd segment maps each '.' to '-' as well, so
     # /home/op/.ms/p -> -home-op--ms-p (double dash from the '/.' pair).
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PWD", "/home/op/.ms/p")
+    monkeypatch.setenv("PWD", "/daemon/wrong")
+    monkeypatch.setenv("METASPHERE_PROJECT_ROOT", "/home/op/.ms/p")
     correct = tmp_path / ".claude" / "projects" / "-home-op--ms-p" / "memory"
     correct.mkdir(parents=True)
     assert _default_memory_root() == correct
 
 
-def test_default_memory_root_fallback_is_fixed_slug(tmp_path, monkeypatch):
-    # Force the function past the PWD-derived branch and the iterdir
-    # scan so the last-resort fallback runs. Stranger installs land
-    # here whenever ~/.claude/projects/ either doesn't exist or holds
-    # no child with memory/MEMORY.md. The fallback slug must be a
-    # fixed constant (``.claude/projects/_no_memory/memory``) and must
-    # NOT derive from HOME, PWD, or any other environment-bound name,
-    # otherwise a shipped path can leak an operator identifier.
+def test_default_memory_root_fallback_is_metasphere_root(tmp_path, monkeypatch):
+    # No canonical project env falls back to METASPHERE_DIR, never PWD or a
+    # first-found unrelated memory directory.
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PWD", "")
+    monkeypatch.setenv("PWD", "/daemon/wrong")
+    monkeypatch.setenv("METASPHERE_DIR", str(tmp_path / ".metasphere"))
+    monkeypatch.delenv("METASPHERE_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("METASPHERE_REPO_ROOT", raising=False)
     fallback = _default_memory_root()
     suffix = fallback.relative_to(tmp_path).as_posix()
-    assert suffix == ".claude/projects/_no_memory/memory", (
-        f"fallback slug must be fixed; got: {suffix!r}"
-    )
+    slug = re.sub(r"[/.]", "-", str(tmp_path / ".metasphere"))
+    assert suffix == f".claude/projects/{slug}/memory"

@@ -10,7 +10,6 @@ memo from a past incident.
 from __future__ import annotations
 
 import math
-import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -26,29 +25,34 @@ _DAMP_VOCAB = 2000.0
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+\.md)\)")
 
 
-def _default_memory_root() -> Path:
-    """Locate the auto-memory directory under ``~/.claude/projects/``."""
-    home = Path(os.environ.get("HOME", "~")).expanduser()
-    pwd = os.environ.get("PWD", "")
-    if pwd:
-        # Claude Code names each project dir by replacing every '/' and '.'
-        # in the absolute cwd with '-'. The leading '/' already yields the
-        # single leading dash (e.g. /home/op/proj -> -home-op-proj); a
-        # dotted segment maps each '.' too (~/.metasphere -> --metasphere).
-        # Prepending an extra '-' produced a double leading dash that never
-        # matched a real dir, silently falling through to the first-found
-        # MEMORY.md scan (the wrong project on a multi-project host).
-        slug = re.sub(r"[/.]", "-", pwd)
-        candidate = home / ".claude" / "projects" / slug / "memory"
-        if candidate.is_dir():
-            return candidate
-    base = home / ".claude" / "projects"
-    if base.is_dir():
-        for child in sorted(base.iterdir()):
-            mem = child / "memory"
-            if (mem / "MEMORY.md").is_file():
-                return mem
-    return home / ".claude" / "projects" / "_no_memory" / "memory"
+def _default_memory_root(project_root: Path | str | None = None) -> Path:
+    """Return the Claude auto-memory tree for an explicit project root.
+
+    The old resolver used daemon ``PWD`` and then selected the first memory
+    tree it found.  Both are process-global accidents: a gateway launched
+    from ``$HOME`` could recall a different project's memories.  Callers that
+    know the active project pass it explicitly; the environment fallback is
+    the canonical root exported by every managed Metasphere launch path.
+    There is deliberately no ambient-cwd or first-directory fallback.
+    """
+    from ..paths import home as metasphere_home
+
+    if project_root is None:
+        import os
+        project_root = (
+            os.environ.get("METASPHERE_PROJECT_ROOT")
+            or os.environ.get("METASPHERE_REPO_ROOT")
+        )
+    if project_root:
+        root = Path(project_root).expanduser().resolve()
+        slug = re.sub(r"[/.]", "-", str(root))
+        return Path.home() / ".claude" / "projects" / slug / "memory"
+
+    # Managed installs without a project override are rooted at the
+    # Metasphere runtime, never at the daemon's cwd.
+    root = metasphere_home().expanduser().resolve()
+    slug = re.sub(r"[/.]", "-", str(root))
+    return Path.home() / ".claude" / "projects" / slug / "memory"
 
 
 def _tokenize(s: str) -> set[str]:

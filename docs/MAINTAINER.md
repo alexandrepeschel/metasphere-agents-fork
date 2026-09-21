@@ -118,7 +118,10 @@ the git history reads as a record of the harness's reasoning.
 - Per-turn hooks installed into `~/.metasphere/.claude/settings.local.json`
   by `install.sh`: `metasphere hooks context` (UserPromptSubmit) +
   `metasphere hooks posthook` (Stop) — both subcommands of the
-  unified CLI, paths rewritten by `metasphere update` on relocate.
+  unified CLI, paths rewritten by `metasphere update` on relocate. Codex uses
+  the same commands from the single user-level `~/.codex/hooks.json`; update
+  migrates old Metasphere-owned project/runtime copies to avoid duplicate
+  hook execution while preserving unrelated hooks.
 - Lifecycle daemon enforces consolidation, dormancy, reap, and ping
   cadence on tasks and agents.
 
