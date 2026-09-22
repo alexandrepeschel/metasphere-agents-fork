@@ -618,19 +618,9 @@ def test_git_pull_or_reset_refuses_when_status_fails():
         _update._git_pull_or_reset(Path("/tmp"), "main", runner)
 
 
-def test_git_pull_or_reset_refuses_on_unpushed_commits():
-    """Clean tree but HEAD ahead of origin → refuse before resetting.
-
-    Regression: 2026-09-15. The dirty-tree guard above only watches
-    uncommitted work, so *committing* — the obvious way to protect WIP —
-    moved it out of the guard's view and into the reset's path. The 04:00
-    auto-update ran against a checked-out feature branch holding two
-    unpushed commits (a 09-02 tmux paste-tail fix and a docs fix from that
-    night), could not fast-forward a diverged branch, fell through to
-    `git reset --hard origin/main`, and left both unreferenced.
-    """
+def _unpushed_runner(calls, *, rebase_rc=0):
+    """Fake git: clean tree, two unpushed commits, scriptable rebase result."""
     import subprocess as _sp
-    calls: list[list[str]] = []
 
     def runner(args):
         calls.append(args)
@@ -643,16 +633,48 @@ def test_git_pull_or_reset_refuses_on_unpushed_commits():
                 "b2d5ad5 fix(tmux): don't re-fire C-m for a residual paste tail\n",
                 "",
             )
+        if args[0] == "rebase" and len(args) > 1 and args[1] != "--abort":
+            return _sp.CompletedProcess(args, rebase_rc, "", "CONFLICT (content)")
         return _sp.CompletedProcess(args, 0, "", "")
 
-    with pytest.raises(RuntimeError, match="not on origin/main"):
+    return runner
+
+
+def test_git_pull_or_reset_rebases_unpushed_commits_instead_of_resetting():
+    """Clean tree but HEAD ahead of origin → replay, never reset.
+
+    Regression: 2026-09-15. The dirty-tree guard only watches uncommitted
+    work, so *committing* — the obvious way to protect WIP — moved it out of
+    the guard's view and into the reset's path, and two commits were left
+    unreferenced.
+
+    Second regression, 2026-09-22: refusing outright fixed the data loss and
+    replaced it with a silent seven-morning freeze on stale code. A rebase
+    keeps the commits and still lands everything from the remote, so both
+    failure modes are closed at once.
+    """
+    calls: list[list[str]] = []
+    _update._git_pull_or_reset(Path("/tmp"), "main", _unpushed_runner(calls))
+
+    verbs = [c[0] for c in calls]
+    assert "rebase" in verbs, f"expected a rebase, got {calls}"
+    assert "reset" not in verbs, f"a reset would orphan the local commits, got {calls}"
+
+
+def test_git_pull_or_reset_refuses_when_the_rebase_conflicts():
+    """A conflicted replay needs a human — abort, keep HEAD, and say so."""
+    calls: list[list[str]] = []
+    runner = _unpushed_runner(calls, rebase_rc=1)
+
+    with pytest.raises(RuntimeError, match="conflicts"):
         _update._git_pull_or_reset(Path("/tmp"), "main", runner)
 
-    # Fetching is fine (and required to ask the question accurately), but
-    # nothing that can move HEAD may run.
+    assert ["rebase", "--abort"] in calls, (
+        f"a half-finished rebase makes every later run see a dirty tree, got {calls}"
+    )
     for c in calls:
         assert c[0] not in ("pull", "reset"), (
-            f"unpushed-commit refusal must abort BEFORE moving HEAD, got {c}"
+            f"conflict refusal must not move HEAD, got {c}"
         )
 
 
