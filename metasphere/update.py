@@ -434,25 +434,74 @@ def _dirty_paths(runner: GitRunner) -> list[str]:
     return [line for line in (r.stdout or "").splitlines() if line.strip()]
 
 
-def _unpushed_commits(runner: GitRunner, branch: str) -> list[str]:
+def _unpushed_commits(runner: GitRunner, branch: str) -> list[str] | None:
     """Return one-line descriptions of commits on HEAD but not ``origin/<branch>``.
 
-    Empty list = nothing would be lost by resetting onto the remote. A
-    failed rev-list fails closed (returns a sentinel) for the same reason
-    :func:`_dirty_paths` does: "can't tell" must not read as "safe".
+    Empty list = nothing would be lost by resetting onto the remote.
+    ``None`` = the question could not be answered, which callers must treat
+    as "commits may be at risk" rather than as "safe" — the same fail-closed
+    posture :func:`_dirty_paths` takes. It is distinct from the empty list
+    because the recovery differs: unpushed commits can be replayed onto the
+    remote, but an unusable ``rev-list`` means we do not know what we would
+    be replaying.
     """
     r = runner(["rev-list", "--oneline", f"origin/{branch}..HEAD"])
     if r.returncode != 0:
-        return [f"(git rev-list failed rc={r.returncode})"]
+        return None
     return [line for line in (r.stdout or "").splitlines() if line.strip()]
+
+
+def _rebase_or_refuse(runner: GitRunner, branch: str, unpushed: list[str]) -> None:
+    """Replay local commits onto ``origin/<branch>``, or refuse if they conflict.
+
+    The 2026-09-15 guard turned "unpushed commits get destroyed" into
+    "unpushed commits stop the update", and nothing pings when it refuses.
+    By 2026-09-22 that had held for seven consecutive mornings while
+    upstream moved seven merged PRs ahead — the host sat on stale code
+    because a *review queue* was slow, which is not a reason for a machine
+    to stop updating itself.
+
+    A rebase is the operation that satisfies both halves: local work keeps
+    its identity as commits, and the checkout still ends up carrying
+    everything on the remote. It is also exactly what the operator ends up
+    doing by hand, so automating it removes a step rather than adding a
+    policy.
+
+    Refuses on conflict rather than guessing: a conflicted rebase needs a
+    human, and leaving the repo mid-rebase would make every subsequent run
+    see a dirty tree and refuse for a reason that has nothing to do with
+    the real problem. Always aborts before raising.
+    """
+    rebase = runner(["rebase", f"origin/{branch}"])
+    if rebase.returncode == 0:
+        logger.info("rebased %d local commit(s) onto origin/%s", len(unpushed), branch)
+        return
+    # Leave no half-finished rebase behind, whatever the failure was.
+    abort = runner(["rebase", "--abort"])
+    if abort.returncode != 0:
+        logger.warning("git rebase --abort failed (rc=%s)", abort.returncode)
+    preview = "\n  ".join(unpushed[:20])
+    more = f"\n  ...and {len(unpushed) - 20} more" if len(unpushed) > 20 else ""
+    raise RuntimeError(
+        f"refusing to update: HEAD has {len(unpushed)} commit(s) not on "
+        f"origin/{branch}, and replaying them onto it conflicts "
+        f"(rc={rebase.returncode}).\n"
+        "The rebase was aborted, so the checkout is untouched and nothing "
+        "is lost.\n"
+        "Resolve by hand, push, or reset explicitly, before re-running.\n"
+        f"Unpushed commits:\n  {preview}{more}\n"
+        f"{(rebase.stderr or rebase.stdout or '').strip()}"
+    )
 
 
 def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
     """Fast-forward ``repo`` to ``origin/<branch>`` with a hard-reset fallback.
 
-    Refuses to proceed if the working tree has uncommitted changes, or if
-    the checked-out HEAD carries commits that are not on ``origin/<branch>``
-    — the fallback is ``git reset --hard``, which silently destroys both.
+    Refuses to proceed if the working tree has uncommitted changes — the
+    fallback is ``git reset --hard``, which silently destroys them. If HEAD
+    carries commits that are not on ``origin/<branch>``, hands off to
+    :func:`_rebase_or_refuse`, which replays them onto the remote instead of
+    resetting over them, and refuses only when that conflicts.
 
     The uncommitted-changes guard came from 2026-04-16 (10 files of
     uncommitted tmux work erased by a wake-triggered auto-update). It was
@@ -491,16 +540,17 @@ def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
             f"{(pre_fetch.stderr or pre_fetch.stdout or '').strip()}"
         )
     unpushed = _unpushed_commits(runner, branch)
-    if unpushed:
-        preview = "\n  ".join(unpushed[:20])
-        more = f"\n  ...and {len(unpushed) - 20} more" if len(unpushed) > 20 else ""
+    if unpushed is None:
         raise RuntimeError(
-            f"refusing to update: HEAD has {len(unpushed)} commit(s) not on "
-            f"origin/{branch}.\n"
-            "The reset --hard fallback would leave them unreferenced.\n"
-            "Push them, or reset explicitly, before re-running.\n"
-            f"Unpushed commits:\n  {preview}{more}"
+            "refusing to update: git rev-list failed, so whether HEAD holds "
+            f"commits missing from origin/{branch} is unknown.\n"
+            "The reset --hard fallback would leave any such commits "
+            "unreferenced.\n"
+            "Fix the repo, then re-run."
         )
+    if unpushed:
+        _rebase_or_refuse(runner, branch, unpushed)
+        return
     ff = runner(["pull", "--ff-only", "origin", branch])
     if ff.returncode == 0:
         return
