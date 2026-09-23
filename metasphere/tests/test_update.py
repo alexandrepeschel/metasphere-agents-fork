@@ -618,6 +618,144 @@ def test_git_pull_or_reset_refuses_when_status_fails():
         _update._git_pull_or_reset(Path("/tmp"), "main", runner)
 
 
+def _unpushed_runner(calls, *, rebase_rc=0):
+    """Fake git: clean tree, two unpushed commits, scriptable rebase result."""
+    import subprocess as _sp
+
+    def runner(args):
+        calls.append(args)
+        if args[0] == "status":
+            return _sp.CompletedProcess(args, 0, "", "")
+        if args[0] == "rev-list":
+            return _sp.CompletedProcess(
+                args,
+                0,
+                "0c5276b docs(session): point restart flow at the real command\n"
+                "b2d5ad5 fix(tmux): preserve a residual paste tail\n",
+                "",
+            )
+        if args[0] == "rebase" and len(args) > 1 and args[1] != "--abort":
+            return _sp.CompletedProcess(args, rebase_rc, "", "CONFLICT (content)")
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    return runner
+
+
+def test_git_pull_or_reset_rebases_unpushed_commits_without_resetting():
+    calls: list[list[str]] = []
+
+    _update._git_pull_or_reset(Path("/tmp"), "main", _unpushed_runner(calls))
+
+    assert ["rebase", "--rebase-merges", "origin/main"] in calls
+    assert not any(call[0] == "reset" for call in calls)
+
+
+def test_git_pull_or_reset_aborts_and_refuses_when_rebase_conflicts():
+    calls: list[list[str]] = []
+
+    with pytest.raises(RuntimeError, match="replay.*failed"):
+        _update._git_pull_or_reset(
+            Path("/tmp"), "main", _unpushed_runner(calls, rebase_rc=1)
+        )
+
+    assert ["rebase", "--abort"] in calls
+    assert not any(call[0] in ("pull", "reset") for call in calls)
+
+
+def test_git_pull_or_reset_refuses_when_rev_list_fails():
+    import subprocess as _sp
+
+    def runner(args):
+        if args[0] == "status":
+            return _sp.CompletedProcess(args, 0, "", "")
+        if args[0] == "rev-list":
+            return _sp.CompletedProcess(args, 128, "", "bad revision")
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    with pytest.raises(RuntimeError, match="rev-list"):
+        _update._git_pull_or_reset(Path("/tmp"), "main", runner)
+
+
+def test_git_pull_or_reset_fetches_before_checking_unpushed_commits():
+    import subprocess as _sp
+
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(args)
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    _update._git_pull_or_reset(Path("/tmp"), "main", runner)
+
+    verbs = [call[0] for call in calls]
+    assert verbs.index("fetch") < verbs.index("rev-list")
+
+
+def test_git_pull_or_reset_preserves_local_merge_topology(tmp_path):
+    """A real update must retain local commits, including merge commits."""
+    import subprocess as _sp
+
+    def git(repo: Path, *args: str) -> _sp.CompletedProcess[str]:
+        result = _sp.run(
+            ["git", "-C", str(repo), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        return result
+
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    checkout = tmp_path / "checkout"
+    origin.mkdir()
+    seed.mkdir()
+    git(origin, "init", "--bare", "--initial-branch=main")
+    git(seed, "init", "--initial-branch=main")
+    git(seed, "config", "user.name", "Test User")
+    git(seed, "config", "user.email", "test@example.com")
+    (seed / "base.txt").write_text("base\n", encoding="utf-8")
+    git(seed, "add", "base.txt")
+    git(seed, "commit", "-m", "base")
+    git(seed, "remote", "add", "origin", str(origin))
+    git(seed, "push", "-u", "origin", "main")
+
+    clone = _sp.run(
+        ["git", "clone", str(origin), str(checkout)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert clone.returncode == 0, clone.stderr or clone.stdout
+    git(checkout, "config", "user.name", "Test User")
+    git(checkout, "config", "user.email", "test@example.com")
+
+    git(checkout, "switch", "-c", "local-side")
+    (checkout / "side.txt").write_text("local side\n", encoding="utf-8")
+    git(checkout, "add", "side.txt")
+    git(checkout, "commit", "-m", "local side")
+    git(checkout, "switch", "main")
+    (checkout / "local.txt").write_text("local main\n", encoding="utf-8")
+    git(checkout, "add", "local.txt")
+    git(checkout, "commit", "-m", "local main")
+    git(checkout, "merge", "--no-ff", "local-side", "-m", "merge local side")
+
+    (seed / "remote.txt").write_text("remote update\n", encoding="utf-8")
+    git(seed, "add", "remote.txt")
+    git(seed, "commit", "-m", "remote update")
+    git(seed, "push", "origin", "main")
+
+    _update._git_pull_or_reset(checkout, "main", _update._git(checkout))
+
+    assert (checkout / "remote.txt").read_text(encoding="utf-8") == "remote update\n"
+    assert (checkout / "local.txt").read_text(encoding="utf-8") == "local main\n"
+    assert (checkout / "side.txt").read_text(encoding="utf-8") == "local side\n"
+    merges = git(
+        checkout, "rev-list", "--count", "--merges", "origin/main..HEAD"
+    ).stdout.strip()
+    assert merges == "1"
+
+
 def test_find_repo_prefers_editable_install_over_project_root(tmp_path, monkeypatch):
     """When METASPHERE_PROJECT_ROOT points at the data dir (not a git
     repo), _find_repo should discover the actual repo via the editable

@@ -21,8 +21,10 @@ import dataclasses
 import datetime as _dt
 import json
 import logging
+import re
 import subprocess
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -220,7 +222,8 @@ def resolve_target_agent(job: Job) -> str:
     job-name prefixes; those are removed and live jobs.json files
     were migrated to carry the resolved ``agent_id`` directly.
     """
-    return "@" + (job.agent_id or "main")
+    raw = (job.agent_id or "main").strip() or "main"
+    return raw if raw.startswith("@") else "@" + raw
 
 
 # ---------- dispatch ----------
@@ -249,12 +252,21 @@ def _find_mission(target_agent: str, paths: Paths) -> Path | None:
     return None
 
 
+def _isolated_agent_name(job_name: str) -> str:
+    """Return a readable, collision-resistant name for one cron firing."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", job_name or "cron").strip("-").lower()
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%m%d-%H%M%S")
+    return f"@{slug or 'cron'}-{stamp}-{uuid.uuid4().hex[:8]}"
+
+
 def _wake_target(
     target_agent: str,
     first_task: str | None,
     paths: Paths,
     *,
     model: str = "",
+    session_target: str = "persistent",
+    job_name: str = "",
 ) -> bool:
     """Wake ``target_agent`` via :func:`metasphere.agents.wake_persistent`.
 
@@ -269,10 +281,43 @@ def _wake_target(
         if target_agent == "@orchestrator":
             from .gateway.session import SESSION_NAME, start_session
 
+            if session_target == "isolated" and first_task:
+                try:
+                    record = _agents.spawn_ephemeral(
+                        _isolated_agent_name(job_name),
+                        str(paths.project_root),
+                        first_task,
+                        parent="@scheduler",
+                        paths=paths,
+                        model=model,
+                    )
+                    if record.pid_file is not None:
+                        return True
+                    logger.warning(
+                        "isolated spawn created a harness but launched no "
+                        "process for %s; falling back to orchestrator injection",
+                        job_name or target_agent,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "isolated spawn failed for %s (model=%s); falling "
+                        "back to orchestrator injection: %s",
+                        job_name or target_agent,
+                        model or "default",
+                        exc,
+                    )
+
             if not start_session(paths):
                 return False
             if first_task is None:
                 return True
+            if model:
+                logger.warning(
+                    "job %s configured model=%s but is being injected into "
+                    "the persistent orchestrator pane; the setting has no effect",
+                    job_name or target_agent,
+                    model,
+                )
             banner = _agents._prepare_wake_banner(
                 target_agent, first_task, paths
             )
@@ -410,6 +455,7 @@ def dispatch_to_agent(
     paths: Paths | None = None,
     job_name: str = "",
     model: str = "",
+    session_target: str = "persistent",
 ) -> bool:
     """Wake the target agent or fall back to a ``!task`` message.
 
@@ -428,7 +474,14 @@ def dispatch_to_agent(
         target_agent == "@orchestrator"
         or _find_mission(target_agent, paths) is not None
     ):
-        if _wake_target(target_agent, first_task=payload, paths=paths, model=model):
+        if _wake_target(
+            target_agent,
+            first_task=payload,
+            paths=paths,
+            model=model,
+            session_target=session_target,
+            job_name=job_name,
+        ):
             return True
         # Fall through to inbox-only delivery if wake itself failed.
 
@@ -499,6 +552,7 @@ def run_due_jobs(paths: Paths | None = None, *, now: int | None = None) -> list[
                 paths=paths,
                 job_name=job.name,
                 model=job.model or "",
+                session_target=job.session_target or "persistent",
             )
         results.append(
             FireResult(
@@ -651,6 +705,7 @@ def fire_job(job_ref: str, paths: Paths | None = None) -> FireResult | None:
             paths=paths,
             job_name=job.name,
             model=job.model,
+            session_target=job.session_target or "persistent",
         )
     return FireResult(
         job_id=job.id,

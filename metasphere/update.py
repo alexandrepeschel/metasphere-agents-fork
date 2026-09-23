@@ -434,18 +434,60 @@ def _dirty_paths(runner: GitRunner) -> list[str]:
     return [line for line in (r.stdout or "").splitlines() if line.strip()]
 
 
+def _unpushed_commits(runner: GitRunner, branch: str) -> list[str] | None:
+    """Return commits reachable from HEAD but not ``origin/<branch>``.
+
+    ``None`` means Git could not answer safely; callers must fail closed
+    rather than assuming a hard reset is harmless.
+    """
+    result = runner(["rev-list", "--oneline", f"origin/{branch}..HEAD"])
+    if result.returncode != 0:
+        return None
+    return [
+        line for line in (result.stdout or "").splitlines() if line.strip()
+    ]
+
+
+def _rebase_or_refuse(
+    runner: GitRunner,
+    branch: str,
+    unpushed: list[str],
+) -> None:
+    """Replay local history onto the remote while preserving local merges."""
+    rebase = runner(["rebase", "--rebase-merges", f"origin/{branch}"])
+    if rebase.returncode == 0:
+        logger.info(
+            "rebased %d local commit(s) onto origin/%s",
+            len(unpushed),
+            branch,
+        )
+        return
+
+    abort = runner(["rebase", "--abort"])
+    if abort.returncode != 0:
+        logger.warning("git rebase --abort failed (rc=%s)", abort.returncode)
+    preview = "\n  ".join(unpushed[:20])
+    more = f"\n  ...and {len(unpushed) - 20} more" if len(unpushed) > 20 else ""
+    detail = (rebase.stderr or rebase.stdout or "").strip()
+    raise RuntimeError(
+        f"refusing to update: replay of {len(unpushed)} local commit(s) "
+        f"onto origin/{branch} failed (rc={rebase.returncode}).\n"
+        "The rebase was aborted, so HEAD and the working tree were restored.\n"
+        "Resolve by hand, push, or reset explicitly, before re-running.\n"
+        f"Local commits:\n  {preview}{more}\n{detail}"
+    )
+
+
 def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
     """Fast-forward ``repo`` to ``origin/<branch>`` with a hard-reset fallback.
 
-    Refuses to proceed if the working tree has uncommitted changes —
-    the fallback is ``git reset --hard``, which silently destroys WIP.
-    Hit an operator on 2026-04-16 (10 files of uncommitted tmux work erased
-    by a wake-triggered auto-update). Caller must commit, stash, or
-    explicitly discard before re-running.
+    Refuses to proceed if the working tree has uncommitted changes. If HEAD
+    contains commits not on the remote, replays them with merge topology
+    intact instead of allowing the hard-reset fallback to orphan them.
 
     Mirrors the bash ``git pull --ff-only`` → ``git fetch && git reset --hard``
-    chain from the retired ``scripts/metasphere update`` path. Raises
-    ``RuntimeError`` if the tree is dirty or if both strategies fail.
+    chain from the retired ``scripts/metasphere update`` path for checkouts
+    without local-only commits.
     """
     dirty = _dirty_paths(runner)
     if dirty:
@@ -457,6 +499,21 @@ def _git_pull_or_reset(repo: Path, branch: str, runner: GitRunner) -> None:
             "Commit, stash, or `git checkout -- .` before re-running.\n"
             f"Dirty paths:\n  {preview}{more}"
         )
+    pre_fetch = runner(["fetch", "origin", branch])
+    if pre_fetch.returncode != 0:
+        raise RuntimeError(
+            f"git fetch origin {branch} failed (rc={pre_fetch.returncode}): "
+            f"{(pre_fetch.stderr or pre_fetch.stdout or '').strip()}"
+        )
+    unpushed = _unpushed_commits(runner, branch)
+    if unpushed is None:
+        raise RuntimeError(
+            "refusing to update: git rev-list failed, so Git could not "
+            f"determine whether HEAD has commits missing from origin/{branch}."
+        )
+    if unpushed:
+        _rebase_or_refuse(runner, branch, unpushed)
+        return
     ff = runner(["pull", "--ff-only", "origin", branch])
     if ff.returncode == 0:
         return
