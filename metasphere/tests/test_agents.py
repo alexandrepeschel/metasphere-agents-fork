@@ -1175,6 +1175,42 @@ def test_reap_dormant_kills_idle_session_preserves_persona(tmp_paths: Paths):
         )
 
 
+def test_reap_dormant_failed_kill_preserves_active_status(tmp_paths: Paths):
+    """A failed tmux kill is not dormancy and must remain retryable.
+
+    Publishing ``dormant:`` while the persistent session is still alive hides
+    an active agent behind terminal durable state and suppresses future crash
+    handling. The daemon must report only confirmed kills as transitioned.
+    """
+    _make_persistent(tmp_paths, "@kill-failed")
+    d = tmp_paths.agents / "@kill-failed"
+    (d / "status").write_text("active: persistent session\n")
+
+    def fake_run(cmd, *args, **kwargs):
+        cp = MagicMock()
+        cp.stdout = ""
+        cp.stderr = ""
+        if "has-session" in cmd:
+            cp.returncode = 0
+        elif "display-message" in cmd:
+            cp.returncode = 0
+            cp.stdout = "1000000000"
+        elif "kill-session" in cmd:
+            cp.returncode = 1
+            cp.stderr = "simulated tmux failure"
+        else:
+            cp.returncode = 0
+        return cp
+
+    with patch("metasphere.agents.subprocess.run", side_effect=fake_run):
+        reaped = agents.reap_dormant(
+            paths=tmp_paths, max_idle_seconds=3600
+        )
+
+    assert reaped == []
+    assert (d / "status").read_text() == "active: persistent session\n"
+
+
 def test_reap_dormant_skips_fresh_persistent_and_ephemerals(tmp_paths: Paths):
     """Only idle persistent agents are transitioned. Fresh persistent
     agents (idle < TTL) stay alive with unchanged state, and ephemerals

@@ -1162,10 +1162,11 @@ def reap_dormant(
     idle threshold.
 
     For each qualifying agent:
-    - Write ``status = "dormant: idle Ns (auto-ttl at <utc>)"`` to the
-      agent dir so ``metasphere status`` and human observers can see
-      why the session went away.
     - ``tmux kill-session -t <session>`` (silent no-op if already gone).
+    - After a successful kill, write
+      ``status = "dormant: idle Ns (auto-ttl at <utc>)"`` to the agent dir
+      so ``metasphere status`` and human observers can see why the session
+      went away. A failed kill leaves the active state intact for retry.
     - Persona files (``MISSION.md``, ``SOUL.md``, ``LEARNINGS.md``,
       ``HEARTBEAT.md``, contract sidecars) are preserved — a future
       ``metasphere agent wake <name>`` restarts cleanly from them.
@@ -1194,6 +1195,11 @@ def reap_dormant(
         )
         if not stale:
             continue
+        killed = _tmux_run("kill-session", "-t", session)
+        if killed.returncode != 0:
+            # Do not publish terminal state for a session tmux failed to
+            # remove. Keeping it active also makes the next cadence retry.
+            continue
         if agent.agent_dir is not None:
             try:
                 _atomic_meta_write(
@@ -1203,7 +1209,6 @@ def reap_dormant(
                 )
             except OSError:
                 pass
-        _tmux_run("kill-session", "-t", session)
         try:
             log_event(
                 "agent.dormant",
