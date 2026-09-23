@@ -1251,6 +1251,11 @@ def reap_ephemeral_idle(
       (``metasphere-orchestrator``) — never reap the resident agent.
     - tmux ``session_activity`` reports idle > ``max_idle_seconds``.
 
+    A reaped session is transitioned to a terminal ``complete:`` status.
+    Otherwise the next crash sweep observes its dead pid and newly absent
+    session, rewrites the stale active/spawned status to ``crashed:``, and
+    emits a false parent alert for a one-shot session we intentionally killed.
+
     Returns the list of killed session names. Per-session failures are
     swallowed — this runs on a daemon tick and must never abort the
     gateway loop.
@@ -1286,6 +1291,15 @@ def reap_ephemeral_idle(
         if idle is None or idle <= max_idle_seconds:
             continue
         _tmux_run("kill-session", "-t", session)
+        if rec.agent_dir is not None:
+            try:
+                _atomic_meta_write(
+                    rec.agent_dir,
+                    "status",
+                    f"complete: ephemeral idle session reaped after {idle}s",
+                )
+            except OSError:
+                pass
         # Unlink any leftover ``state/<agent>_deferred_cmd`` marker.
         # Without this, a stale "/exit" marker (left when a posthook
         # never ran — e.g. the cron-fired session was killed externally

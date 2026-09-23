@@ -1725,6 +1725,13 @@ def test_reap_ephemeral_idle_threshold_just_over_does_reap(tmp_paths: Paths):
 
     assert reaped == ["metasphere-boundary-high"]
     assert kill_sessions == ["metasphere-boundary-high"]
+    status = (
+        tmp_paths.agents / "@boundary-high" / "status"
+    ).read_text().strip()
+    assert status.startswith("complete: ephemeral idle session reaped"), (
+        "a successfully reaped one-shot session must become terminal; "
+        f"got {status!r}"
+    )
 
 
 def test_reap_ephemeral_idle_unlinks_stale_deferred_cmd_marker(tmp_paths: Paths):
