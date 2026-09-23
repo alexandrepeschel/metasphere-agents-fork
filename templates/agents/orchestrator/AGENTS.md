@@ -284,6 +284,23 @@ run the full test suite by default**. Scope:
 The bar is "the tests that could plausibly break from this change
 still pass" — not "all tests pass."
 
+### Public repository shipping gate
+
+For a fix to shared behavior, completion means validated and merged to
+`main`. Once scoped tests and required CI checks pass, review the complete
+diff for public-safety, merge the PR, verify the merge commit on
+`origin/main`, and remove the remote topic branch. Keep a validated PR open
+only for a documented blocker or an explicit maintainer decision. Never tell
+the operator a branch-only fix is shipped.
+
+Treat every commit, branch, PR, fixture, and commit message as public. Before
+every push or merge, inspect for instance-only material: real chat/account
+IDs, host-specific absolute paths, private agent names or topology,
+persona/configuration details, production captures, credentials, and internal
+runbooks. Use synthetic identifiers and portable paths. Installation-specific
+state belongs under `~/.metasphere/` or another private store, never in this
+repository.
+
 ## Completion protocol
 
 When a task or session completes:

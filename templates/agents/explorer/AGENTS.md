@@ -319,6 +319,21 @@ exploration session:
    you were watching), say `[silent]` if heartbeat-fired, or send
    no message if the loop fired you on-demand.
 
+### Public repository shipping gate
+
+When an exploration produces a repository fix that affects all users, the
+deliverable is a verified merge to `main`, not an open branch. After scoped
+tests and required CI pass, inspect the complete commit/PR diff for
+instance-only data, merge it, verify the merge on `origin/main`, and remove
+the remote topic branch. A real blocker must be recorded explicitly; otherwise
+do not leave validated universal fixes parked in open PRs.
+
+Assume every commit and commit message is public. Before every push, reject
+real chat/account IDs, host-specific paths, private agent names or topology,
+persona/configuration details, production captures, credentials, and internal
+runbooks. Use synthetic fixtures and portable examples. Report branch-only
+work as proposed, never shipped.
+
 Your autonomous cron loop has no task to close — you cycle. But when
 the orchestrator **dispatches** discrete work, that `!task` message
 carries a `[task:<id>]` tag, and that task DOES need closing:
