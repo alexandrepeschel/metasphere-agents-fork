@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -93,6 +94,10 @@ def test_resolve_target_agent_default_main():
     """Empty ``agent_id`` falls back to ``@main``."""
     j = _make_job(name="something:else", agent_id="")
     assert _sched.resolve_target_agent(j) == "@main"
+
+
+def test_resolve_target_agent_accepts_already_prefixed_ids():
+    assert _sched.resolve_target_agent(_make_job(agent_id="@orchestrator")) == "@orchestrator"
 
 
 def test_resolve_target_agent_ignores_name_prefix():
@@ -635,6 +640,79 @@ def test_dispatch_wakes_orchestrator_without_mission_file(tmp_paths):
     )
 
 
+def test_isolated_job_without_model_still_spawns_ephemeral(tmp_paths):
+    launched = mock.MagicMock(pid_file=tmp_paths.state / "cron.pid")
+    with mock.patch(
+        "metasphere.schedule._agents.spawn_ephemeral", return_value=launched
+    ) as spawn, mock.patch(
+        "metasphere.gateway.session.start_session", return_value=True
+    ) as start, mock.patch(
+        "metasphere.schedule._agents._submit_via_tmux", return_value=True
+    ) as submit:
+        ok = _sched.dispatch_to_agent(
+            "@orchestrator",
+            "run the thing",
+            paths=tmp_paths,
+            job_name="writers-room:daily-checkin",
+            model="",
+            session_target="isolated",
+        )
+
+    assert ok is True
+    start.assert_not_called()
+    submit.assert_not_called()
+    spawn.assert_called_once()
+    assert spawn.call_args.kwargs["model"] == ""
+
+
+def test_isolated_agent_names_do_not_collide_within_one_minute(monkeypatch):
+    ids = iter((SimpleNamespace(hex="a" * 32), SimpleNamespace(hex="b" * 32)))
+    monkeypatch.setattr(_sched.uuid, "uuid4", lambda: next(ids))
+
+    first = _sched._isolated_agent_name("writers-room:daily-checkin")
+    second = _sched._isolated_agent_name("writers-room:daily-checkin")
+
+    assert first != second
+    assert first.startswith("@writers-room-daily-checkin-")
+    assert second.startswith("@writers-room-daily-checkin-")
+
+
+def test_isolated_spawn_without_process_falls_back_to_orchestrator(tmp_paths):
+    not_launched = mock.MagicMock(pid_file=None)
+    with mock.patch(
+        "metasphere.schedule._agents.spawn_ephemeral", return_value=not_launched
+    ), mock.patch(
+        "metasphere.gateway.session.start_session", return_value=True
+    ), mock.patch(
+        "metasphere.schedule._agents._submit_via_tmux", return_value=True
+    ) as submit:
+        ok = _sched.dispatch_to_agent(
+            "@orchestrator",
+            "run the thing",
+            paths=tmp_paths,
+            job_name="daily",
+            model="claude-haiku-4-5-20251001",
+            session_target="isolated",
+        )
+
+    assert ok is True
+    submit.assert_called_once()
+
+
+def test_run_due_jobs_passes_session_target(tmp_paths):
+    job = _make_job(agent_id="@orchestrator", session_target="isolated")
+    _sched.save_jobs([job], tmp_paths, _input_count=1)
+
+    with mock.patch(
+        "metasphere.schedule.cron_should_fire", return_value=True
+    ), mock.patch(
+        "metasphere.schedule.dispatch_to_agent", return_value=True
+    ) as dispatch:
+        _sched.run_due_jobs(tmp_paths, now=1700000100)
+
+    assert dispatch.call_args.kwargs["session_target"] == "isolated"
+
+
 def test_upsert_agent_job_creates_and_preserves_fire_history(tmp_paths):
     created = _sched.upsert_agent_job(
         "daily-check",
@@ -711,5 +789,22 @@ def test_fire_job_dispatches_without_changing_last_fired(tmp_paths):
         paths=tmp_paths,
         job_name="manual-check",
         model="",
+        session_target="persistent",
     )
     assert _sched.load_jobs(tmp_paths)[0].last_fired_at == 0
+
+
+def test_fire_job_passes_session_target(tmp_paths):
+    job = _make_job(
+        id="manual-isolated",
+        agent_id="@orchestrator",
+        session_target="isolated",
+    )
+    _sched.save_jobs([job], tmp_paths, _input_count=1)
+
+    with mock.patch(
+        "metasphere.schedule.dispatch_to_agent", return_value=True
+    ) as dispatch:
+        _sched.fire_job("manual-isolated", tmp_paths)
+
+    assert dispatch.call_args.kwargs["session_target"] == "isolated"
