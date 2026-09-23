@@ -945,6 +945,60 @@ def test_wake_persistent_stale_kills_when_idle_and_not_generating(tmp_paths: Pat
     )
 
 
+def test_wake_persistent_failed_stale_kill_does_not_cold_start(
+    tmp_paths: Paths,
+):
+    """A failed stale-session kill must not claim or attempt replacement.
+
+    Starting another tmux session with the same name cannot succeed while the
+    original remains alive. Returning ``delivered=False`` lets message callers
+    retain the task in the durable inbox instead of falsely reporting a wake.
+    """
+    _make_persistent(tmp_paths, "@kill-failed")
+    d = tmp_paths.agents / "@kill-failed"
+    (d / "last_active").write_text("2020-01-01T00:00:00+00:00")
+    (d / "status").write_text("active: persistent session\n")
+    new_sessions: list[str] = []
+    events: list[tuple[str, str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        cp = MagicMock()
+        cp.stdout = ""
+        cp.stderr = ""
+        if "has-session" in cmd:
+            cp.returncode = 0  # still alive after failed kill
+        elif "display-message" in cmd:
+            cp.returncode = 0
+            cp.stdout = "1000000000"
+        elif "capture-pane" in cmd:
+            cp.returncode = 0
+            cp.stdout = "bypass permissions on"
+        elif "kill-session" in cmd:
+            cp.returncode = 1
+            cp.stderr = "simulated tmux failure"
+        elif "new-session" in cmd:
+            cp.returncode = 0
+            new_sessions.append(cmd[cmd.index("-s") + 1])
+        else:
+            cp.returncode = 0
+        return cp
+
+    def fake_log(event_type, message, **kwargs):
+        events.append((event_type, message))
+
+    with patch("metasphere.agents.subprocess.run", side_effect=fake_run), \
+         patch("metasphere.agents.log_event", side_effect=fake_log):
+        _rec, delivered = agents.wake_persistent(
+            "@kill-failed", first_task="durable task", paths=tmp_paths,
+        )
+
+    assert delivered is False
+    assert new_sessions == []
+    assert (d / "status").read_text() == "active: persistent session\n"
+    assert any(kind == "agent.session.cleanup_failed" for kind, _ in events)
+    assert not any("killed before cold-start" in msg for _, msg in events)
+
+
 def test_wake_persistent_fresh_last_active_survives_stale_tmux(tmp_paths: Paths):
     """The fix: a session whose tmux OUTPUT has been silent past the
     threshold (a long quiet compute) but whose input-side ``last_active`` is
