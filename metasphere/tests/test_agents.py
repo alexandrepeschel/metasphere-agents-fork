@@ -2448,6 +2448,61 @@ def test_on_done_delivered_ephemeral_kills_tmux_and_clears_state(tmp_paths: Path
         assert (d / survived).exists(), f"{survived} must survive ephemeral done"
 
 
+def test_on_done_delivered_failed_live_kill_preserves_runtime_state(
+    tmp_paths: Paths,
+):
+    """A failed kill of a still-live session must remain retryable.
+
+    The !done message itself has already been delivered, but publishing
+    completion and deleting pid/task pointers would hide the live orphan from
+    lifecycle observers. The idle reaper can retry once the session is idle.
+    """
+    d = _make_ephemeral(tmp_paths, "@kill-failed")
+
+    def fake_run(cmd, *args, **kwargs):
+        cp = MagicMock()
+        cp.stdout = ""
+        cp.stderr = ""
+        if "kill-session" in cmd:
+            cp.returncode = 1
+            cp.stderr = "simulated tmux failure"
+        elif "has-session" in cmd:
+            cp.returncode = 0  # kill failed and session is still live
+        else:
+            cp.returncode = 0
+        return cp
+
+    with patch("metasphere.agents.subprocess.run", side_effect=fake_run):
+        killed = agents.on_done_delivered("@kill-failed", paths=tmp_paths)
+
+    assert killed is None
+    assert (d / "pid").read_text() == "12345\n"
+    assert (d / "task_id").read_text() == "task-abc\n"
+    assert (d / "status").read_text() == "working: doing a thing"
+
+
+def test_on_done_delivered_absent_headless_session_still_completes(
+    tmp_paths: Paths,
+):
+    """tmux rc=1 means success for a headless ephemeral with no session."""
+    d = _make_ephemeral(tmp_paths, "@headless")
+
+    def fake_run(cmd, *args, **kwargs):
+        cp = MagicMock()
+        cp.stdout = ""
+        cp.stderr = ""
+        cp.returncode = 1  # kill and has-session both report absent
+        return cp
+
+    with patch("metasphere.agents.subprocess.run", side_effect=fake_run):
+        killed = agents.on_done_delivered("@headless", paths=tmp_paths)
+
+    assert killed == "metasphere-headless"
+    assert not (d / "pid").exists()
+    assert not (d / "task_id").exists()
+    assert (d / "status").read_text().strip() == "complete: !done delivered"
+
+
 def test_on_done_delivered_persistent_does_NOT_kill_tmux(tmp_paths: Paths):
     """A persistent sender's !done is a strict no-op: tmux stays up,
     no status change, no pointer removal. Persistent lifecycle is

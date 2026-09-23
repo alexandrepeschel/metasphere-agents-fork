@@ -1615,10 +1615,28 @@ def on_done_delivered(sender: str, paths: Paths | None = None) -> Optional[str]:
         return None  # persistent agents are not killed on !done
 
     session = rec.session_name
-    # Kill-session is idempotent: rc=1 when session absent, which is
-    # exactly what we want for headless-Popen ephemerals that never
-    # had a tmux pane in the first place.
-    _tmux_run("kill-session", "-t", session)
+    # Kill-session is idempotent: rc=1 when session absent, which is exactly
+    # what we want for headless-Popen ephemerals that never had a tmux pane.
+    # But the same nonzero result can mean a live session could not be killed;
+    # distinguish those cases before erasing the only runtime pointers.
+    killed = _tmux_run("kill-session", "-t", session)
+    if killed.returncode != 0 and session_alive(session):
+        try:
+            log_event(
+                "agent.ephemeral_done.cleanup_failed",
+                f"{agent_id} !done delivered but tmux session {session} "
+                "remains alive; runtime state preserved for retry",
+                agent=agent_id,
+                meta={
+                    "session": session,
+                    "returncode": killed.returncode,
+                    "stderr": (killed.stderr or "").strip(),
+                },
+                paths=paths,
+            )
+        except Exception:
+            pass
+        return None
 
     # Clear runtime state pointers so a future spawn with the same name
     # bootstraps from scratch. Persona/contract/harness files survive.
