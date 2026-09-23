@@ -1290,7 +1290,12 @@ def reap_ephemeral_idle(
         idle = _session_idle_seconds(session)
         if idle is None or idle <= max_idle_seconds:
             continue
-        _tmux_run("kill-session", "-t", session)
+        killed = _tmux_run("kill-session", "-t", session)
+        if killed.returncode != 0:
+            # Keep the non-terminal status and deferred marker intact so the
+            # next daemon cadence can retry. Claiming completion here would
+            # hide a still-live zombie session after a tmux failure.
+            continue
         if rec.agent_dir is not None:
             try:
                 _atomic_meta_write(
