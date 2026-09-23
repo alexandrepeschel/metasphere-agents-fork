@@ -108,6 +108,25 @@ the git history reads as a record of the harness's reasoning.
 - **Documentation in `docs/` is public-facing**. Internal runbooks
   go to `~/.metasphere/runbooks/`, never committed.
 
+## Public-repository ship gate
+
+Treat every commit, branch, pull request, test fixture, and commit message as
+public. Before pushing any commit, inspect its complete diff and history for
+instance-only material: real chat or account IDs, host-specific absolute
+paths, private agent names or topology, persona/configuration details,
+captured production data, tokens, credentials, and internal runbook content.
+Use synthetic identifiers and portable paths in code and tests. If an
+instance-specific detail is useful only for operating one installation, keep
+it under `~/.metasphere/` or another private state store; do not commit it.
+
+A fix to shared product behavior is not complete when a branch or PR exists.
+After the relevant tests and required CI checks pass, review the final diff
+for public-safety, merge the PR to `main`, verify the merge commit is present
+on `origin/main`, and remove the remote topic branch. Leave a validated PR
+open only when a documented blocker or explicit maintainer decision requires
+it. Report branch-only work as "proposed" or "fixed on a branch," never as
+shipped.
+
 ## Architecture
 
 - Python package; users see `metasphere <subcommand>` (a console
