@@ -880,6 +880,27 @@ def wake_persistent(
             rec, agent_dir, session, _STALE_SESSION_THRESHOLD_SEC, paths,
         )
         if stale:
+            killed = _tmux_run("kill-session", "-t", session)
+            if killed.returncode != 0 and session_alive(session):
+                try:
+                    log_event(
+                        "agent.session.cleanup_failed",
+                        f"{agent_id} stale session {session} remains alive; "
+                        "cold-start skipped and delivery deferred",
+                        agent=agent_id,
+                        meta={
+                            "session": session,
+                            "idle_seconds": idle,
+                            "threshold_seconds": _STALE_SESSION_THRESHOLD_SEC,
+                            "reason": "stale-wake",
+                            "returncode": killed.returncode,
+                            "stderr": (killed.stderr or "").strip(),
+                        },
+                        paths=paths,
+                    )
+                except Exception:
+                    pass
+                return rec, False
             try:
                 log_event(
                     "agent.session",
@@ -896,7 +917,6 @@ def wake_persistent(
                 )
             except Exception:
                 pass
-            _tmux_run("kill-session", "-t", session)
             # Fall through to cold-start below.
         else:
             delivered = True
