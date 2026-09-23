@@ -1725,6 +1725,51 @@ def test_reap_ephemeral_idle_threshold_just_over_does_reap(tmp_paths: Paths):
 
     assert reaped == ["metasphere-boundary-high"]
     assert kill_sessions == ["metasphere-boundary-high"]
+    status = (
+        tmp_paths.agents / "@boundary-high" / "status"
+    ).read_text().strip()
+    assert status.startswith("complete: ephemeral idle session reaped"), (
+        "a successfully reaped one-shot session must become terminal; "
+        f"got {status!r}"
+    )
+
+
+def test_reap_ephemeral_idle_failed_kill_stays_nonterminal(tmp_paths: Paths):
+    """A failed tmux kill is not a reap and must remain retryable.
+
+    Marking the agent complete after a nonzero kill result would hide a live
+    zombie session behind terminal durable state, and returning it as reaped
+    would make the daemon's batch event falsely claim cleanup succeeded.
+    """
+    import time as _real_time
+
+    d = _make_ephemeral_dir(tmp_paths, "@kill-failed")
+    just_over = str(int(_real_time.time()) - 1801)
+
+    def fake_run(cmd, *args, **kwargs):
+        cp = MagicMock()
+        cp.stdout = ""
+        cp.stderr = ""
+        if "list-sessions" in cmd:
+            cp.returncode = 0
+            cp.stdout = "metasphere-kill-failed\n"
+        elif "display-message" in cmd:
+            cp.returncode = 0
+            cp.stdout = just_over
+        elif "kill-session" in cmd:
+            cp.returncode = 1
+            cp.stderr = "simulated tmux failure"
+        else:
+            cp.returncode = 0
+        return cp
+
+    with patch("metasphere.agents.subprocess.run", side_effect=fake_run):
+        reaped = agents.reap_ephemeral_idle(
+            paths=tmp_paths, max_idle_seconds=1800
+        )
+
+    assert reaped == []
+    assert (d / "status").read_text() == "spawned: do stuff\n"
 
 
 def test_reap_ephemeral_idle_unlinks_stale_deferred_cmd_marker(tmp_paths: Paths):
