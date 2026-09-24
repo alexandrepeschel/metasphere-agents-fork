@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -2131,6 +2132,87 @@ def _seed_ephemeral_with_pid(
     if write_pid:
         (d / "pid").write_text(f"{pid}\n")
     return d
+
+
+_HAS_PROCFS = Path("/proc/self/status").exists()
+
+
+@pytest.mark.skipif(not _HAS_PROCFS, reason="zombie detection is procfs-only")
+def test_pid_alive_reports_zombie_as_dead():
+    """A zombie is dead, and signal-0 cannot tell.
+
+    Forks a real child that exits immediately and deliberately does NOT
+    reap it, so the pid entry survives as ``Z (zombie)``. ``os.kill(pid, 0)``
+    still succeeds against it — that is the bug this guards. Regression for
+    the 2026-09-24 case where an agent sat defunct for eight hours in status
+    ``spawned:``, never alerted, and its scheduled job silently never ran.
+    """
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child never returns
+        os._exit(0)
+    try:
+        # Wait for the child to actually reach zombie state rather than
+        # assuming the fork/exit race resolved in our favour.
+        for _ in range(500):
+            if agents._pid_is_zombie(pid):
+                break
+            time.sleep(0.01)
+
+        assert agents._pid_is_zombie(pid), "child never became a zombie"
+        # The precondition that makes the bug possible: the canonical probe
+        # says this dead process is alive.
+        os.kill(pid, 0)
+        assert agents._pid_alive(pid) is False, (
+            "zombie must read as dead — signal-0 succeeds against it, so "
+            "reap_crashed would skip it forever"
+        )
+    finally:
+        os.waitpid(pid, 0)
+
+    # Once reaped the pid is gone entirely, and both probes agree.
+    assert agents._pid_alive(pid) is False
+    assert agents._pid_is_zombie(pid) is False
+
+
+@pytest.mark.skipif(not _HAS_PROCFS, reason="zombie detection is procfs-only")
+def test_reap_crashed_transitions_zombie_pid(tmp_paths: Paths):
+    """End to end: an agent whose recorded pid is a zombie gets reaped.
+
+    Exercises the real ``_pid_alive`` rather than patching it — patching it
+    is what let this bug live, since every existing reap test asserts on a
+    mocked liveness answer.
+    """
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child never returns
+        os._exit(0)
+    try:
+        for _ in range(500):
+            if agents._pid_is_zombie(pid):
+                break
+            time.sleep(0.01)
+        assert agents._pid_is_zombie(pid), "child never became a zombie"
+
+        d = _seed_ephemeral_with_pid(
+            tmp_paths, "@zombie-agent", pid=pid, parent="@orchestrator",
+        )
+
+        sent: list[tuple] = []
+
+        def fake_send(target, label, body, from_agent, paths=None, **kwargs):
+            sent.append((target, label))
+            m = MagicMock()
+            m.id = "msg-fake"
+            return m
+
+        with patch("metasphere.agents.session_alive", return_value=False), \
+             patch("metasphere.messages.send_message", side_effect=fake_send):
+            reaped = agents.reap_crashed(paths=tmp_paths)
+    finally:
+        os.waitpid(pid, 0)
+
+    assert reaped == ["@zombie-agent"]
+    assert (d / "status").read_text().startswith("crashed:")
+    assert sent == [("@orchestrator", "!alert")]
 
 
 def test_reap_crashed_live_pid_no_op(tmp_paths: Paths):

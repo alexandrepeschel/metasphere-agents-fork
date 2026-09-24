@@ -1446,22 +1446,56 @@ def _exit_self_tombstone_current(
     return True
 
 
+def _pid_is_zombie(pid: int) -> bool:
+    """True iff ``pid`` is a zombie — exited, awaiting a parent ``wait()``.
+
+    Linux only, via ``/proc/<pid>/status``. Anywhere without procfs this
+    returns False, which restores the pre-2026-09-24 behaviour rather than
+    guessing: a wrong "dead" would crash-alert on a live agent.
+    """
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    # "State:\tZ (zombie)" -> "Z"
+                    parts = line.split()
+                    return len(parts) >= 2 and parts[1] == "Z"
+    except OSError:
+        pass
+    return False
+
+
 def _pid_alive(pid: int) -> bool:
-    """True iff process ``pid`` exists.
+    """True iff process ``pid`` exists *and is still running*.
 
     Uses signal-0 — the canonical no-op liveness probe (see kill(2)).
     A ``PermissionError`` means the process exists but is owned by
     another uid; that still counts as alive (we cannot disprove it).
+
+    **Zombies count as dead, and this is the whole point of the function.**
+    signal-0 succeeds against a zombie: the process has exited but its pid
+    table entry survives until the parent reaps it, and a parent that never
+    calls ``wait()`` keeps that entry forever. So the canonical probe
+    reports a dead agent as alive indefinitely, and
+    :func:`reap_crashed` — whose entire job is catching silent deaths —
+    skips the one class of death it can never later detect.
+
+    Seen in practice: three ephemeral agents died in the same minute. Two
+    were reaped normally and alerted; the third sat defunct for hours in
+    status ``spawned:``, raised no ``!alert``, and its output simply never
+    arrived. The only difference was who held the pid entry.
     """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
+        # Another uid's process. We cannot read its /proc status either,
+        # so we cannot disprove liveness — say alive, as before.
         return True
     except OSError:
         return False
-    return True
+    return not _pid_is_zombie(pid)
 
 
 def reap_crashed(paths: Paths | None = None) -> list[str]:
