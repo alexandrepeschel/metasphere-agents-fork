@@ -211,14 +211,39 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         target = _resolve_session(caller)
         if not session_alive(target):
+            # Headless ``claude -p`` ephemeral: nothing to kill, the
+            # process exits on its own when the turn ends. But the
+            # clean-exit intent must still be recorded — cron jobs
+            # tell every ephemeral to run exit-self last, and without
+            # the tombstone that natural exit reads as pid-dead +
+            # no-session, so reap_crashed files it as a silent death
+            # (every headless cron run since 2026-09-24).
+            try:
+                marked = mark_exit_self(caller, target)
+            except Exception:
+                marked = False
+            if not marked:
+                print(
+                    f"Error: no live tmux session for {caller} "
+                    f"(resolved to {target}) and no agent dir to record "
+                    f"the exit in.",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                log_event(
+                    "agent.exit_self",
+                    f"{caller} recorded clean exit (headless, no session)",
+                    agent=caller,
+                    meta={"session": target, "headless": True},
+                )
+            except Exception:
+                pass
             print(
-                f"Error: no live tmux session for {caller} "
-                f"(resolved to {target}). exit-self only applies to "
-                f"agents running in tmux; headless ``claude -p`` "
-                f"ephemerals exit on their own.",
-                file=sys.stderr,
+                f"headless: clean exit recorded for {caller}; "
+                f"the process exits on its own when this turn ends"
             )
-            return 1
+            return 0
         # Tombstone before the kill is queued: once the detached kill
         # lands, pid and session both read dead and the next
         # reap_crashed sweep would classify this clean exit as a

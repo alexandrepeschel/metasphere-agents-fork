@@ -112,9 +112,35 @@ def test_exit_self_no_agent_env_returns_1(monkeypatch, capsys):
     assert "METASPHERE_AGENT_ID" in err
 
 
-def test_exit_self_headless_no_tmux_returns_1(monkeypatch, capsys):
-    """Agent has no live tmux session (headless ``claude -p``) →
-    exit code 1, clean stderr, no crash, no kill spawn."""
+def test_exit_self_headless_records_tombstone_without_kill(monkeypatch):
+    """Headless ``claude -p`` agent (no tmux session) → no kill spawn,
+    but the clean-exit tombstone is written and rc is 0. Without it the
+    natural process exit reads as a silent death to reap_crashed
+    (2026-09-25 @writers-room-conversion false crash !alert)."""
+    monkeypatch.setenv("METASPHERE_AGENT_ID", "@headless-spawn")
+    marked: list[tuple[str, str]] = []
+
+    with patch(
+        "metasphere.cli.session._resolve_session",
+        return_value="metasphere-headless-spawn",
+    ), patch(
+        "metasphere.cli.session.session_alive", return_value=False
+    ), patch(
+        "metasphere.cli.session.subprocess.Popen",
+        side_effect=AssertionError("Popen must not be called"),
+    ), patch(
+        "metasphere.cli.session.mark_exit_self",
+        side_effect=lambda c, t, paths=None: marked.append((c, t)) or True,
+    ):
+        rc = cli_session.main(["exit-self"])
+
+    assert rc == 0
+    assert marked == [("@headless-spawn", "metasphere-headless-spawn")]
+
+
+def test_exit_self_headless_no_agent_dir_returns_1(monkeypatch, capsys):
+    """Headless and the tombstone cannot be written (no agent dir) →
+    exit code 1 naming the caller and session, no kill spawn."""
     monkeypatch.setenv("METASPHERE_AGENT_ID", "@headless-spawn")
 
     with patch(
@@ -125,6 +151,8 @@ def test_exit_self_headless_no_tmux_returns_1(monkeypatch, capsys):
     ), patch(
         "metasphere.cli.session.subprocess.Popen",
         side_effect=AssertionError("Popen must not be called"),
+    ), patch(
+        "metasphere.cli.session.mark_exit_self", return_value=False
     ):
         rc = cli_session.main(["exit-self"])
 
