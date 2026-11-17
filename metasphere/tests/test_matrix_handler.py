@@ -14,6 +14,7 @@ ROOM = "!room:hs"
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     handler._TEXT_CACHE.clear()
+    handler._WARNED_ENCRYPTED.clear()
     monkeypatch.setattr(handler, "_archive", lambda *a, **k: None)
     monkeypatch.setattr(handler, "_archive_reaction", lambda *a, **k: None)
     monkeypatch.setattr(handler, "_pin", lambda *a, **k: None)
@@ -222,3 +223,20 @@ def test_slash_command_answered_not_injected(monkeypatch):
     r = Rec()
     assert handler.handle_event(msg("/ping"), ROOM, **r.kw()) is True
     assert r.sends == [(ROOM, "pong", {})] and not r.submits
+
+
+def test_encrypted_event_warns_once_and_is_not_injected():
+    r = Rec()
+    ev = {"type": "m.room.encrypted", "event_id": "$enc", "sender": ALEX,
+          "content": {"algorithm": "m.megolm.v1.aes-sha2"}}
+    assert handler.handle_event(ev, ROOM, **r.kw()) is False
+    assert handler.handle_event(dict(ev, event_id="$enc2"), ROOM, **r.kw()) is False
+    assert len(r.sends) == 1 and "encrypted" in r.sends[0][1]
+    assert not r.submits
+
+
+def test_encrypted_event_from_stranger_is_silent():
+    r = Rec()
+    ev = {"type": "m.room.encrypted", "event_id": "$enc", "sender": "@evil:hs", "content": {}}
+    handler.handle_event(ev, ROOM, **r.kw())
+    assert not r.sends

@@ -243,6 +243,30 @@ def _ensure_session(target_agent_id: str) -> None:
         logger.warning("matrix session start failed for %s: %r", target_agent_id, e)
 
 
+_WARNED_ENCRYPTED: set[str] = set()
+
+
+def _warn_encrypted(room_id: str, sender: str, self_user: str, allowed: list[str],
+                    sender_fn: Optional[Callable[..., Any]]) -> None:
+    """An allowed user wrote into an END-TO-END ENCRYPTED room: the bot has no
+    Olm/Megolm keys, so the message is unreadable. Say so once per room per
+    process instead of failing silently (a silent drop looks like a dead bot)."""
+    if sender == self_user or not routing.is_allowed(sender, allowed):
+        return
+    if room_id in _WARNED_ENCRYPTED:
+        return
+    _WARNED_ENCRYPTED.add(room_id)
+    logger.warning("matrix: encrypted message in %s from %s is unreadable", room_id, sender)
+    try:
+        (sender_fn or (lambda room, text, **kw: api.send_message(room, text, **kw)))(
+            room_id,
+            "I can't read this room: it is end-to-end encrypted and I have no keys. "
+            "Please use the unencrypted room I invited you to (\"Clay (unencrypted)\").",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ------------------------------------------------------------------ entry
 
 def handle_event(
@@ -268,6 +292,9 @@ def handle_event(
     sender = str(ev.get("sender") or "")
     event_id = str(ev.get("event_id") or "")
     content = ev.get("content") or {}
+    if etype == "m.room.encrypted":
+        _warn_encrypted(room_id, sender, self_user, allowed or [], sender_fn)
+        return False
     if etype not in ("m.room.message", "m.reaction"):
         return False
     if sender == self_user:
