@@ -15,6 +15,9 @@ dependencies = [
   # (~3MB), which is small relative to the agent stack's footprint.
   "slack-bolt>=1.21,<2",
   "slack-sdk>=3.36,<4",
+  # Matrix surface adapter — plain HTTPS client-server API + markdown->HTML.
+  "requests>=2.28,<3",
+  "markdown-it-py>=3,<5",
 ]
 
 [project.optional-dependencies]

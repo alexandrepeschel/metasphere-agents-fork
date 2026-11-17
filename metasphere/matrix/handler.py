@@ -56,9 +56,9 @@ def strip_reply_fallback(body: str) -> str:
     i = 0
     while i < len(lines) and _FALLBACK_LINE.match(lines[i]):
         i += 1
-    if i < len(lines) and lines[i].strip() == "":
-        i += 1
-    return "\n".join(lines[i:]).strip()
+    if i >= len(lines) or lines[i].strip() != "":
+        return body  # no blank-line terminator: a real quote, not a fallback
+    return "\n".join(lines[i + 1:]).strip()
 
 
 def _in_reply_to(content: dict) -> Optional[str]:

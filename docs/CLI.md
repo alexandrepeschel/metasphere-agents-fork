@@ -28,6 +28,7 @@ Subcommands:
   message               Send a message across any surface (Telegram, Slack, ...).
   telegram              Send Telegram messages, upload documents, or run getMe.
   slack                 Send Slack messages via a configured Slack surface.
+  matrix                Send Matrix messages, documents and voice notes.
   hooks                 Per-turn Claude Code hook entrypoints (posthook|context|pretool|git).
   schedule              Cron-style scheduler: add, remove, list, fire, enable, disable, daemon.
   consolidate           Sweep active tasks: classify, ping, escalate, archive.
@@ -262,7 +263,7 @@ Commands:
                                    via setMyCommands.
   send-document <path> [--caption ...] [--filename ...] [--chat-id ...]
                                    Upload a file to the chat via
-                                   sendDocument.
+                                   sendDocument (--voice: sendVoice).
   groups <subcommand> ...          See `metasphere telegram groups
                                    --help` for thread/topic management.
 
@@ -298,6 +299,29 @@ Options:
 For rich content — parens, bullets (•), backticks, $, quotes, newlines —
 pass the body via stdin (positional "-") or --body-file to avoid ALL shell
 escaping. For full cross-surface routing use `metasphere message send`.
+```
+
+### `metasphere matrix`
+
+Send Matrix messages, documents and voice notes.
+
+```
+Usage: metasphere matrix send "<markdown>" [--room <id>] [--surface <id>]
+       metasphere matrix send - < body.md
+       metasphere matrix send --html "<b>bold</b> text" [--room <id>]
+       metasphere matrix send-document PATH [--caption TEXT] [--voice] [--room <id>]
+
+Options:
+  --room <id>       Room id (!abc:server). Default: MATRIX_ROOM_ALEX from
+                    ~/.metasphere/config/matrix.env (the DM with the operator).
+  --surface <id>    Matrix surface id (default: matrix).
+  --html            Treat the body as HTML (b, i, a, code, ...) instead of
+                    markdown.
+  --body-file PATH  Read the body verbatim from a file (no shell quoting).
+  --voice           (send-document) post as a voice message (m.audio).
+
+Markdown (numbered lists, bold, code) is rendered by Element. For rich
+content skip shell quoting: `metasphere matrix send - <<'EOF' ... EOF`.
 ```
 
 ### `metasphere hooks`

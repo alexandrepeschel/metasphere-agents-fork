@@ -32,6 +32,7 @@ import json
 import sys
 from metasphere.paths import resolve
 from metasphere.posthook import (
+    _matrix_pin,
     _resolve_chat_id,
     extract_stop_assistant_text,
     read_stop_hook_payload,
@@ -55,11 +56,13 @@ def _dry_run(stdin_bytes: bytes) -> int:
     chunk_size = 4000
     chunk_count = 0 if not text_str else (len(text_str) + chunk_size - 1) // chunk_size
     chat_id = _resolve_chat_id(paths)
+    mx = _matrix_pin(paths)
 
     summary = {
         "agent": agent,
         "stop_hook_active": bool(payload.get("stop_hook_active")) if isinstance(payload, dict) else False,
-        "chat_id": chat_id,
+        "chat_id": mx[1] if mx else chat_id,
+        "surface": mx[0] if mx else "telegram",
         "text_length": len(text_str),
         "chunk_count": chunk_count,
         "would_send": (

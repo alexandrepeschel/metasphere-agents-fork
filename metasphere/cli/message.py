@@ -55,7 +55,7 @@ thin wrapper that pins surface_id to "telegram".
 """
 
 
-_SUPPORTED_SURFACE_TYPES = ("telegram", "slack")
+_SUPPORTED_SURFACE_TYPES = ("telegram", "slack", "matrix")
 
 
 def _surface_type(surface_id: str) -> str:
@@ -79,10 +79,23 @@ def _resolve_auto_surface(agent: str) -> tuple[Optional[str], Optional[str | int
     from metasphere.paths import resolve as _resolve
     from metasphere.routing.active import get_active_conversation
 
-    pin = get_active_conversation(agent, _resolve())
+    paths = _resolve()
+    pin = get_active_conversation(agent, paths)
+    borrowed = False
+    if not pin and agent != "@orchestrator":
+        # Scheduled jobs / ephemeral agents never receive inbound, so they
+        # have no pin of their own. "Auto" means "wherever the operator last
+        # wrote to the orchestrator" — follow that pin so a cron message
+        # lands on the surface Alex is actually using.
+        pin = get_active_conversation("@orchestrator", paths)
+        borrowed = True
     if not pin:
         return None, None
-    return str(pin.get("surface_id") or ""), pin.get("chat_id")
+    # A borrowed pin supplies only the SURFACE: its chat may be a group the
+    # operator wrote in, and a cron must never post there. chat_id None makes
+    # the caller resolve the operator's DM (addressbook / default recipient).
+    chat = None if borrowed else pin.get("chat_id")
+    return str(pin.get("surface_id") or ""), chat
 
 
 def _dispatch(
@@ -132,6 +145,33 @@ def _dispatch(
         _sl_api.send_with_cc(
             surface_id, str(chat_id), text, sender_agent_id=sender_agent,
         )
+        print(f"Sent to {chat_id} via {sender_agent} (surface={surface_id})")
+        return 0
+    if stype == "matrix":
+        if thread_id is not None:
+            print("Error: --thread-id is only valid for Telegram.", file=sys.stderr)
+            return 2
+        from metasphere.matrix import api as _mx_api
+        try:
+            _mx_api.send_with_cc(str(chat_id), text, cfg=_mx_api.load_config(surface_id))
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        except _mx_api.MatrixAPIError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        if sender_agent == "@orchestrator":
+            try:
+                from metasphere import paths as _paths
+                from metasphere.posthook import mark_orchestrator_explicit_send
+                mark_orchestrator_explicit_send(_paths.resolve())
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            from metasphere.telegram import archiver as _arch
+            _arch.archive_outgoing(sender_agent, text, str(chat_id), surface_id=surface_id)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            pass
         print(f"Sent to {chat_id} via {sender_agent} (surface={surface_id})")
         return 0
     print(
@@ -190,6 +230,13 @@ def cmd_send(args: argparse.Namespace) -> int:
     # Final fallback: legacy default Telegram recipient.
     if chat_id is None and _surface_type(surface_id) == "telegram":
         chat_id = _contacts.default_telegram_chat_id()
+
+    if chat_id is None and _surface_type(surface_id) == "matrix":
+        try:
+            from metasphere.matrix import api as _mx_api
+            chat_id = _mx_api.load_config(surface_id).room_alex or None
+        except Exception:  # noqa: BLE001
+            chat_id = None
 
     if chat_id is None:
         print(

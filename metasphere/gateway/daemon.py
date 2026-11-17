@@ -18,6 +18,7 @@ from ..events import log_event
 from ..paths import Paths, resolve
 from ..slack import api as _slack_api
 from .adapter import SurfaceAdapter
+from .adapters.matrix import MatrixAdapter
 from .adapters.slack import SlackAdapter
 from .adapters.telegram import TelegramAdapter
 from .session import ensure_session, write_harness_hash_baseline
@@ -68,6 +69,35 @@ def _discover_slack_surface_ids(config_dir: Optional[str] = None) -> List[str]:
         if name.endswith(".env"):
             ids.append(name[: -len(".env")])
     return sorted(ids)
+
+
+def _discover_matrix_surface_ids(config_dir: Optional[str] = None) -> List[str]:
+    """Discover Matrix surface ids from ``matrix*.env`` config files.
+
+    ``matrix.env`` -> ``matrix``; ``matrix-foo.env`` -> ``matrix-foo``.
+    Only surfaces whose homeserver + access token resolve are returned, so
+    a half-configured install stays quiet instead of logging a poll error
+    every tick.
+    """
+    cfg = config_dir if config_dir is not None else os.path.expanduser("~/.metasphere/config")
+    try:
+        matches = glob.glob(os.path.join(cfg, "matrix*.env"))
+    except OSError:
+        return []
+    ids: List[str] = []
+    for path in sorted(matches):
+        name = os.path.basename(path)
+        if not name.endswith(".env"):
+            continue
+        sid = name[: -len(".env")]
+        try:
+            from ..matrix.api import load_config as _mx_load
+
+            _mx_load(sid)
+        except Exception:  # noqa: BLE001
+            continue
+        ids.append(sid)
+    return ids
 
 
 def _telegram_configured() -> bool:
@@ -178,6 +208,8 @@ def _default_adapters() -> List[SurfaceAdapter]:
         )
     for surface_id in _discover_slack_surface_ids():
         adapters.append(SlackAdapter(surface_id))
+    for surface_id in _discover_matrix_surface_ids():
+        adapters.append(MatrixAdapter(surface_id))
     return adapters
 
 

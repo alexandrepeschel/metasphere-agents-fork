@@ -46,6 +46,7 @@ SUBCOMMANDS: tuple[Subcommand, ...] = (
     Subcommand("message",      "metasphere.cli.message"),
     Subcommand("telegram",     "metasphere.cli.telegram"),
     Subcommand("slack",        "metasphere.cli.slack"),
+    Subcommand("matrix",       "metasphere.cli.matrix"),
     Subcommand("hooks",        "metasphere.cli.hooks"),
     Subcommand("schedule",     "metasphere.cli.schedule"),
     Subcommand("consolidate",  "metasphere.cli.consolidate"),

@@ -390,8 +390,27 @@ def _strip_trailing_idle(text: str) -> str:
     return _TRAILING_IDLE_PATTERN.sub("", text).rstrip()
 
 
+def _matrix_pin(paths: Paths) -> tuple[str, str] | None:
+    """``(surface_id, room_id)`` when the orchestrator's active conversation
+    is a Matrix surface, else ``None`` (-> Telegram, the legacy default)."""
+    try:
+        from .routing.active import get_active_conversation
+
+        pin = get_active_conversation("@orchestrator", paths)
+    except Exception:  # noqa: BLE001
+        return None
+    if not pin:
+        return None
+    sid = str(pin.get("surface_id") or "")
+    chat = str(pin.get("chat_id") or "")
+    if sid.partition("-")[0] == "matrix" and chat:
+        return sid, chat
+    return None
+
+
 def route_to_telegram(text: str, paths: Paths) -> None:
-    """Send ``text`` to Telegram, deduping
+    """Send ``text`` to the operator's active surface (Telegram unless the
+    orchestrator's active conversation pin is Matrix), deduping
     against the last-sent hash. Failures are logged, never raised.
     """
     if not text:
@@ -422,13 +441,23 @@ def route_to_telegram(text: str, paths: Paths) -> None:
         pass
 
     try:
-        from .telegram import api as telegram_api
+        matrix_pin = _matrix_pin(paths)
+        if matrix_pin is not None:
+            # --surface auto: the operator last wrote on Matrix, so the
+            # end-of-turn text follows them there.
+            from .matrix import api as matrix_api
 
-        chat_id = _resolve_chat_id(paths)
-        if chat_id is None:
-            _log_telegram_error(paths, "no chat_id configured (telegram_chat_id missing)")
-            return
-        telegram_api.send_with_cc(chat_id, text)
+            matrix_api.send_message(
+                matrix_pin[1], text, cfg=matrix_api.load_config(matrix_pin[0]),
+            )
+        else:
+            from .telegram import api as telegram_api
+
+            chat_id = _resolve_chat_id(paths)
+            if chat_id is None:
+                _log_telegram_error(paths, "no chat_id configured (telegram_chat_id missing)")
+                return
+            telegram_api.send_with_cc(chat_id, text)
     except Exception as exc:  # noqa: BLE001 — must never raise
         # Persist nothing on failure: a transient send error must not
         # poison the dedupe state and silently swallow the next retry.
@@ -442,6 +471,27 @@ def route_to_telegram(text: str, paths: Paths) -> None:
         pass
 
 
+def _consume_matrix_ack(paths: Paths) -> None:
+    """Matrix twin of the Telegram ack: react 👍 on the triggering event."""
+    pending = paths.state / "matrix_pending_ack.json"
+    try:
+        if not pending.exists():
+            return
+        data = json.loads(pending.read_text(encoding="utf-8"))
+        try:
+            pending.unlink()
+        except OSError:
+            pass
+        room, eid = data.get("room_id"), data.get("event_id")
+        if not room or not eid:
+            return
+        from .matrix import api as matrix_api
+
+        matrix_api.react(room, eid, "👍")
+    except Exception as exc:  # noqa: BLE001
+        _log_telegram_error(paths, f"matrix ack reaction failed: {exc}")
+
+
 def consume_pending_ack(paths: Paths) -> None:
     """Replace the gateway's 👀 with 👍 on the user message that triggered
     this turn. Called from ``run_posthook`` after we know the turn produced
@@ -449,6 +499,7 @@ def consume_pending_ack(paths: Paths) -> None:
     ``metasphere-telegram send``) delivered the reply. Always consumes the
     marker so a stale entry can't ack the next unrelated turn. Best-effort.
     """
+    _consume_matrix_ack(paths)
     pending = paths.state / "telegram_pending_ack.json"
     try:
         if not pending.exists():
