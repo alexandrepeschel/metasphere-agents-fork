@@ -16,6 +16,13 @@ from metasphere.paths import Paths
 # session_health
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _no_host_matrix_surfaces(monkeypatch):
+    """Host ``matrix.env`` must not leak a MatrixAdapter into default-adapter
+    assertions (or start a real /sync worker from a test)."""
+    monkeypatch.setattr(gw_daemon, "_discover_matrix_surface_ids", lambda *a, **k: [])
+
 def test_session_health_dead_when_no_session(tmp_paths: Paths):
     with patch.object(gw_session, "_agents_session_alive", return_value=False):
         alive, idle = gw_session.session_health(tmp_paths)

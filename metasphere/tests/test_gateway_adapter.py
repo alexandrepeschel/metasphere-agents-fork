@@ -27,6 +27,13 @@ from metasphere.paths import Paths
 # ---------------------------------------------------------------------------
 
 
+
+@pytest.fixture(autouse=True)
+def _no_host_matrix_surfaces(monkeypatch):
+    """Host ``matrix.env`` must not leak a MatrixAdapter into default-adapter
+    assertions (or start a real /sync worker from a test)."""
+    monkeypatch.setattr(gw_daemon, "_discover_matrix_surface_ids", lambda *a, **k: [])
+
 def test_telegram_adapter_implements_surface_adapter_protocol():
     adapter = TelegramAdapter()
     assert isinstance(adapter, SurfaceAdapter)
