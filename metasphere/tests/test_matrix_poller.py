@@ -29,6 +29,7 @@ def _resp(batch, *evs, room="!r:hs"):
 
 def _ev(eid):
     return {"type": "m.room.message", "event_id": eid, "sender": ALEX,
+            "origin_server_ts": 10**13,
             "content": {"msgtype": "m.text", "body": eid}}
 
 
@@ -139,3 +140,37 @@ def test_worker_backs_off_on_error_and_recovers():
         return {"next_batch": "s2"}
     poller._worker("matrix", queue.Queue(), stop, sync_fn, sleeps.append)
     assert sleeps == [1.0] and n["i"] == 2
+
+
+def test_first_run_drops_events_older_than_run_start():
+    """A homeserver may serve a cached/older initial position; events stamped
+    before this run began are dropped, newer ones kept."""
+    stop = threading.Event()
+
+    def sync_fn(since, **kw):
+        if since is None:
+            return {"next_batch": "s0"}
+        stop.set()
+        old = dict(_ev("$old"), origin_server_ts=1_000)
+        new = dict(_ev("$new"), origin_server_ts=100_000)
+        return _resp("s1", old, new)
+
+    q = queue.Queue()
+    poller._worker("matrix", q, stop, sync_fn, lambda s: None, now_ms=lambda: 100_000)
+    _, events = q.get_nowait()
+    assert [e["event_id"] for _, e in events] == ["$new"]
+
+
+def test_resume_from_token_keeps_old_events():
+    """Messages sent while the gateway was down are delivered after restart."""
+    poller.save_state("matrix", "s1", [])
+    stop = threading.Event()
+
+    def sync_fn(since, **kw):
+        stop.set()
+        return _resp("s2", dict(_ev("$while_down"), origin_server_ts=1_000))
+
+    q = queue.Queue()
+    poller._worker("matrix", q, stop, sync_fn, lambda s: None, now_ms=lambda: 100_000)
+    _, events = q.get_nowait()
+    assert [e["event_id"] for _, e in events] == ["$while_down"]

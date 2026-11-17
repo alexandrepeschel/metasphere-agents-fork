@@ -69,13 +69,20 @@ def extract_events(sync_resp: dict) -> list[tuple[str, dict]]:
 
 
 def _worker(surface_id: str, evt_queue: "queue.Queue[Any]", stop: threading.Event,
-            sync_fn: Callable[..., dict], sleep: Callable[[float], None]) -> None:
+            sync_fn: Callable[..., dict], sleep: Callable[[float], None],
+            now_ms: Callable[[], int] = lambda: int(time.time() * 1000)) -> None:
     state = load_state(surface_id)
     since: Optional[str] = state.get("next_batch") or None
+    # First-ever run (no persisted token): homeservers may serve a cached or
+    # older initial-sync position, so also drop any event stamped before this
+    # run began. Resuming from a persisted token must NOT filter: messages
+    # sent while the gateway was down are delivered on purpose.
+    floor_ts: Optional[int] = None
     backoff = 1.0
     while not stop.is_set():
         try:
             if since is None:
+                floor_ts = now_ms() - 5000
                 resp = sync_fn(None, timeout_ms=0, initial=True)
                 since = resp.get("next_batch")
                 if since:
@@ -84,7 +91,11 @@ def _worker(surface_id: str, evt_queue: "queue.Queue[Any]", stop: threading.Even
                 continue
             resp = sync_fn(since, timeout_ms=25000)
             nb = resp.get("next_batch") or since
-            evt_queue.put((nb, extract_events(resp)))
+            events = extract_events(resp)
+            if floor_ts is not None:
+                events = [(r, e) for r, e in events
+                          if (e.get("origin_server_ts") or 0) >= floor_ts]
+            evt_queue.put((nb, events))
             since = nb
             backoff = 1.0
         except api.MatrixAPIError as e:
