@@ -36,5 +36,5 @@ def reply_command(surface_id: str, room_id: str) -> str:
 
 
 def short_name(user_id: str) -> str:
-    """``@alexandre_peschel:matrix.org`` -> ``alexandre_peschel``."""
+    """``@alice:matrix.org`` -> ``alice``."""
     return (user_id or "").lstrip("@").partition(":")[0] or "user"

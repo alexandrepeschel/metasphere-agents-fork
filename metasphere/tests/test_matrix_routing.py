@@ -19,4 +19,4 @@ def test_reply_command_is_shell_safe():
 
 
 def test_short_name():
-    assert routing.short_name("@alexandre_peschel:matrix.org") == "alexandre_peschel"
+    assert routing.short_name("@alice:matrix.org") == "alice"
