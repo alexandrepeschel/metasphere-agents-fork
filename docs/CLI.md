@@ -263,7 +263,7 @@ Commands:
                                    via setMyCommands.
   send-document <path> [--caption ...] [--filename ...] [--chat-id ...]
                                    Upload a file to the chat via
-                                   sendDocument (--voice: sendVoice).
+                                   sendDocument.
   groups <subcommand> ...          See `metasphere telegram groups
                                    --help` for thread/topic management.
 
